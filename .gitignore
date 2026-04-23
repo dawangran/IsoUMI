@@ -1,0 +1,7 @@
+*.o
+src/longumi
+tmp_buckets/
+*.bam
+*.bai
+*.sam
+*.tsv
