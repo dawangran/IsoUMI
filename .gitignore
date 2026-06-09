@@ -1,7 +1,12 @@
 *.o
-src/longumi
+src/isoumi
 tmp_buckets/
+examples/output/
+benchmarks/output/
 *.bam
 *.bai
 *.sam
 *.tsv
+.DS_Store
+!examples/*.sam
+!examples/*.tsv

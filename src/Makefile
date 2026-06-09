@@ -1,4 +1,4 @@
-# LongUMI Makefile
+# IsoUMI Makefile
 CC ?= cc
 UNAME_S := $(shell uname -s 2>/dev/null)
 ifeq ($(UNAME_S),Darwin)
@@ -13,12 +13,18 @@ CFLAGS ?= -O3 -march=native -Wall -Wextra -std=c11 $(OPENMP_CFLAGS)
 LDFLAGS ?= $(OPENMP_LDFLAGS)
 EXTRA_CFLAGS ?=
 EXTRA_LDFLAGS ?=
-COMMON_LIB_DIRS := -L/usr/local/lib -L/opt/homebrew/lib
+COMMON_LIB_DIRS := $(foreach d,/usr/local/lib /opt/homebrew/lib,$(if $(wildcard $(d)),-L$(d)))
+RHTSLIB_PREFIX ?= /Library/Frameworks/R.framework/Versions/4.2-arm64/Resources/library/Rhtslib
+HTS_EXTRA_LIBS ?= -lz -lbz2 -llzma -lcurl
+CRYPTO_LIBS ?=
 
 PKGCONFIG ?= $(shell command -v pkg-config 2>/dev/null)
+HAVE_HTSLIB_PC := $(shell if [ -n "$(PKGCONFIG)" ] && $(PKGCONFIG) --exists htslib 2>/dev/null; then echo yes; fi)
 ifeq ($(origin HTSLIB_INC), undefined)
-ifeq ($(PKGCONFIG),)
-RHTSLIB_PREFIX := /Library/Frameworks/R.framework/Versions/4.2-arm64/Resources/library/Rhtslib
+ifeq ($(HAVE_HTSLIB_PC),yes)
+HTS_CFLAGS := $(shell $(PKGCONFIG) --cflags htslib)
+HTS_LDFLAGS := $(shell $(PKGCONFIG) --libs htslib)
+else
 ifneq ($(wildcard $(RHTSLIB_PREFIX)/include/htslib/sam.h),)
 HTSLIB_INC ?= $(RHTSLIB_PREFIX)/include
 HTSLIB_LIB ?= $(RHTSLIB_PREFIX)/usrlib
@@ -27,21 +33,18 @@ HTSLIB_INC ?= /usr/local/include
 HTSLIB_LIB ?= /usr/local/lib
 endif
 HTS_CFLAGS := -I$(HTSLIB_INC)
-HTS_LDFLAGS := -L$(HTSLIB_LIB) $(COMMON_LIB_DIRS) -lhts -lz -lbz2 -llzma -lcurl -lcrypto
-else
-HTS_CFLAGS := $(shell pkg-config --cflags htslib)
-HTS_LDFLAGS := $(shell pkg-config --libs htslib)
+HTS_LDFLAGS := -L$(HTSLIB_LIB) $(COMMON_LIB_DIRS) -lhts $(HTS_EXTRA_LIBS) $(CRYPTO_LIBS)
 endif
 else
 HTS_CFLAGS := -I$(HTSLIB_INC)
-HTS_LDFLAGS := -L$(HTSLIB_LIB) $(COMMON_LIB_DIRS) -lhts -lz -lbz2 -llzma -lcurl -lcrypto
+HTS_LDFLAGS := -L$(HTSLIB_LIB) $(COMMON_LIB_DIRS) -lhts $(HTS_EXTRA_LIBS) $(CRYPTO_LIBS)
 endif
 
 INC := $(HTS_CFLAGS)
 LIBS := $(HTS_LDFLAGS)
 
 OBJS = main.o cli.o io.o sj.o key.o umi.o vector.o key_build.o pipeline.o
-BIN = longumi
+BIN = isoumi
 
 all: $(BIN)
 
@@ -50,6 +53,11 @@ all: $(BIN)
 
 $(BIN): $(OBJS)
 	$(CC) $(CFLAGS) $(INC) -o $@ $(OBJS) $(LDFLAGS) $(LIBS) $(EXTRA_LDFLAGS)
+
+.PHONY: all test clean
+
+test: $(BIN)
+	sh ../tests/smoke.sh ./$(BIN)
 
 clean:
 	rm -f $(OBJS) $(BIN)

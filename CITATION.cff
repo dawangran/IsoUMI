@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use IsoUMI, please cite the software and the associated application note."
+title: "IsoUMI: isoform-aware UMI correction and molecule-level deduplication for long-read single-cell transcriptomics"
+version: "0.1.0"
+date-released: "2026-06-05"
+authors:
+  - name: "IsoUMI contributors"
+license: MIT
+repository-code: "https://github.com/your-org/IsoUMI"
+url: "https://github.com/your-org/IsoUMI"
+abstract: "IsoUMI corrects raw UMI tags and marks molecule-level duplicates in long-read single-cell BAM files using cell barcode sharding, splice-junction or locus-aware grouping, optional transcript-end bins, and quality-aware UMI collapse."
+keywords:
+  - single-cell RNA-seq
+  - long-read sequencing
+  - UMI correction
+  - molecule deduplication
+  - isoform analysis

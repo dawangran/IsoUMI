@@ -1,6 +1,6 @@
-# LongUMI
+# IsoUMI
 
-LongUMI is a command-line tool for UMI correction and molecule-level deduplication on long-read single-cell BAM files.
+IsoUMI is a command-line tool for UMI correction and molecule-level deduplication on long-read single-cell BAM files.
 
 It is designed for workflows where each read may carry:
 
@@ -9,11 +9,11 @@ It is designed for workflows where each read may carry:
 - an optional UMI quality tag such as `UY`
 - an optional gene tag such as `GX`
 
-LongUMI groups reads by cell and transcript context, corrects low-support UMIs toward higher-support UMIs, marks duplicates, and writes a corrected BAM plus optional TSV reports.
+IsoUMI groups reads by cell and transcript context, corrects low-support UMIs toward higher-support UMIs, marks duplicates, and writes a corrected BAM plus optional TSV reports.
 
 ## What It Does
 
-Given one or more BAM files, LongUMI:
+Given one or more BAM files, IsoUMI:
 
 1. Splits reads into cell-barcode buckets for parallel processing.
 2. Builds a molecule grouping key from:
@@ -39,19 +39,28 @@ Given one or more BAM files, LongUMI:
 - Header merging for multi-input BAMs
 - Unmapped reads are passed through without participating in molecule collapse
 
+## Availability And Citation
+
+IsoUMI is released under the MIT license. The publication release is version `0.1.0`.
+
+- Source code: update `CITATION.cff` with the final GitHub URL before submission.
+- Archive DOI: add the Zenodo or institutional archive DOI after tagging the release.
+- Citation metadata: see [`CITATION.cff`](./CITATION.cff).
+- Application note draft: see [`docs/application_note.md`](./docs/application_note.md).
+
 ## Build
 
-The source code lives in [`src/`](./src). The binary is built there as `longumi`.
+The source code lives in [`src/`](./src). The binary is built there as `isoumi`.
 
 ### Standard build
 
 ```bash
-make -C src
+make
 ```
 
 ### Dependencies
 
-LongUMI depends on:
+IsoUMI depends on:
 
 - `htslib`
 - zlib / bzip2 / lzma / curl / OpenSSL libraries needed by your local `htslib`
@@ -68,14 +77,26 @@ Examples:
 make -C src HTSLIB_INC=/path/to/htslib/include HTSLIB_LIB=/path/to/htslib/lib
 ```
 
-If your system linker cannot find `libcrypto`, install or expose OpenSSL to the linker and rerun `make`.
+If your `htslib` build needs OpenSSL symbols, pass them explicitly through `CRYPTO_LIBS`, for example:
+
+```bash
+make CRYPTO_LIBS="-lcrypto"
+```
+
+Run the smoke test after building:
+
+```bash
+make test
+```
+
+Continuous integration is configured in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) for Ubuntu builds with `libhts-dev`.
 
 ## Quick Start
 
 ### Single BAM
 
 ```bash
-src/longumi --bam input.bam --out sample
+src/isoumi --bam input.bam --out sample
 ```
 
 This writes:
@@ -85,7 +106,7 @@ This writes:
 ### Multiple BAMs
 
 ```bash
-src/longumi \
+src/isoumi \
   --bam sample1.bam \
   --bam sample2.bam \
   --out merged_run
@@ -94,15 +115,26 @@ src/longumi \
 ### BAM list file
 
 ```bash
-src/longumi --bam-list bam_files.txt --out run1
+src/isoumi --bam-list bam_files.txt --out run1
 ```
 
 Where `bam_files.txt` contains one BAM path per line. Blank lines and `#` comments are allowed.
 
+### Minimal Reproducible Example
+
+A tiny SAM fixture is provided under [`examples/`](./examples) for checking command-line behavior:
+
+```bash
+make
+sh examples/run_minimal.sh
+```
+
+The example writes outputs under `examples/output/` and should show raw UMI `AAAT` collapsing to `AAAA` in `minimal.corrections.tsv`.
+
 ## Recommended Example
 
 ```bash
-src/longumi \
+src/isoumi \
   --bam input.bam \
   --out sample \
   --threads 8 \
@@ -122,7 +154,7 @@ This writes:
 
 ## Core Algorithm
 
-LongUMI defines a candidate molecule using a grouping key of the form:
+IsoUMI defines a candidate molecule using a grouping key of the form:
 
 - `CB`
 - `GX` or `GX=NA`
@@ -147,10 +179,11 @@ Inside each group:
 
 ## Input Expectations
 
-LongUMI expects:
+IsoUMI expects:
 
 - BAM inputs with compatible reference dictionaries
 - UMI values stored as 2-character SAM tags
+- cell barcode values stored in `--cell-tag`
 - optional UMI-quality values stored as a string tag of the same length as the UMI
 
 For multiple BAM inputs:
@@ -163,7 +196,7 @@ For multiple BAM inputs:
 
 ### Corrected BAM
 
-LongUMI writes a corrected UMI tag to `--umi-out` (default `UB`).
+IsoUMI writes a corrected UMI tag to `--umi-out` (default `UB`).
 
 It also writes a duplicate flag tag to `--dup-flag` (default `DA`) with the following semantics:
 
@@ -176,6 +209,14 @@ Unmapped reads:
 - are passed through
 - keep `UB=UR` if a raw UMI exists
 - are written with `DA=0`
+
+Mapped reads without a cell barcode:
+
+- do not participate in molecule correction
+- are passed through
+- keep `UB=UR` if a raw UMI exists
+- are written with `DA=0`
+- are omitted from molecule, assignment, and correction reports
 
 ### Sort Order
 
@@ -275,6 +316,8 @@ Columns:
 - `count+distance`: correction supported by count and sequence distance
 - `count+quality`: correction additionally supported by quality information
 
+For `self` rows, `confidence` is reported as `1.0`. For actual UMI corrections, `confidence` is a heuristic merge score derived from count ratio, Hamming distance, and optional UMI quality; it is not a posterior probability.
+
 ## Practical Tips
 
 - Start with defaults if your BAM already carries `CB`, `UR`, `UY`, and `GX`.
@@ -289,7 +332,7 @@ Columns:
 ### Conservative correction
 
 ```bash
-src/longumi \
+src/isoumi \
   --bam input.bam \
   --out conservative \
   --ham 1 \
@@ -301,7 +344,7 @@ src/longumi \
 ### Isoform-aware grouping
 
 ```bash
-src/longumi \
+src/isoumi \
   --bam input.bam \
   --out isoform_run \
   --end-bin 25 \
@@ -312,7 +355,7 @@ src/longumi \
 ### Tag remapping
 
 ```bash
-src/longumi \
+src/isoumi \
   --bam input.bam \
   --out custom_tags \
   --cell-tag XC \
@@ -327,14 +370,48 @@ src/longumi \
 
 - UMI distance is still sequence-based and currently uses Hamming distance only.
 - UMI quality is used for ranking and confidence scoring, not a full probabilistic error model.
-- Final BAM linking may depend on your local OpenSSL and `htslib` setup.
+- Final BAM linking depends on your local `htslib` setup; some static `htslib` builds may require extra libraries through `HTS_EXTRA_LIBS` or `CRYPTO_LIBS`.
 - Output BAM is not coordinate-sorted by construction.
+
+## Release Checks
+
+Before tagging a publication release:
+
+```bash
+make clean
+make
+make test
+sh examples/run_minimal.sh
+```
+
+The release checklist is maintained in [`docs/release_checklist.md`](./docs/release_checklist.md).
+
+## Benchmark Scaffold
+
+For publication benchmarks, use [`scripts/benchmark_isoumi.sh`](./scripts/benchmark_isoumi.sh) as the command template and document datasets under [`benchmarks/`](./benchmarks). The scaffold records exact commands and elapsed time for default, transcript-end-aware, and conservative correction settings.
 
 ## Repository Layout
 
 ```text
 .
+├── CITATION.cff
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── LICENSE
+├── Makefile
 ├── README.md
+├── VERSION
+├── benchmarks/
+│   └── README.md
+├── docs/
+│   ├── application_note.md
+│   └── release_checklist.md
+├── examples/
+│   ├── README.md
+│   ├── minimal.sam
+│   └── run_minimal.sh
+├── tests/
+│   └── smoke.sh
 └── src/
     ├── Makefile
     ├── main.c
@@ -350,4 +427,4 @@ src/longumi \
 
 Current version string in the source:
 
-- `LongUMI 0.3.2 (fixed pipeline.c)`
+- `IsoUMI 0.1.0`

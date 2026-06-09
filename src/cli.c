@@ -9,7 +9,7 @@
 #include <string.h>
 #include <getopt.h>
 
-static const char* LONGUMI_VERSION = "LongUMI 0.3.2 (fixed pipeline.c)";
+static const char* ISOUMI_VERSION = "IsoUMI 0.1.0";
 
 static char* xstrdup(const char* s){
   if(!s) return NULL;
@@ -84,12 +84,12 @@ static char* trim_in_place(char *s){
 
 static void usage(void){
   fprintf(stderr,
-"LongUMI: Long-read UMI correction with cell-bucket sharding\n"
+"IsoUMI: Isoform-aware long-read UMI correction with cell-bucket sharding\n"
 "%s\n"
 "\n"
 "USAGE:\n"
-"  longumi --bam <in.bam> [--bam <in2.bam> ...] --out <prefix> [OPTIONS]\n"
-"  longumi --bam-list <list.txt> --out <prefix> [OPTIONS]\n"
+"  isoumi --bam <in.bam> [--bam <in2.bam> ...] --out <prefix> [OPTIONS]\n"
+"  isoumi --bam-list <list.txt> --out <prefix> [OPTIONS]\n"
 "\n"
 "INPUTS (choose one mode):\n"
 "  --bam <FILE>           Input BAM. Repeatable. Example: --bam A.bam --bam B.bam\n"
@@ -130,7 +130,7 @@ static void usage(void){
 "\n"
 "HELP:\n"
 "  -h, --help             Show this help and exit\n"
-"      --version          Print version and exit\n", LONGUMI_VERSION);
+"      --version          Print version and exit\n", ISOUMI_VERSION);
 }
 
 int parse_args(int argc, char **argv, cli_opts_t *o){
@@ -257,7 +257,7 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
         if (parse_int_opt("--locus-bin", optarg, 1, &o->locus_bin) != 0) return -1;
         break;
       case 16:
-        fprintf(stderr, "%s\n", LONGUMI_VERSION); exit(0);
+        printf("%s\n", ISOUMI_VERSION); exit(0);
       case 17:
         if (parse_int_opt("--sj-jitter", optarg, 0, &o->sj_jitter) != 0) return -1;
         break;

@@ -268,8 +268,6 @@ static int cmp_umi_stat_desc(const void* a, const void* b){
   const umi_stat_t* x=(const umi_stat_t*)a;
   const umi_stat_t* y=(const umi_stat_t*)b;
   if (x->count!=y->count) return (y->count-x->count);
-  if (x->mean_qual < y->mean_qual) return 1;
-  if (x->mean_qual > y->mean_qual) return -1;
   return strcmp(x->umi, y->umi);
 }
 typedef struct {
@@ -408,6 +406,16 @@ static double compute_merge_confidence(const cli_opts_t* o, const umi_stat_t* la
   return clamp01(0.55 * size_component + 0.20 * dist_component + 0.25 * qual_component);
 }
 
+static int better_representative(const cli_opts_t* o, const umi_stat_t* candidate, const umi_stat_t* current){
+  if (!current) return 1;
+  if (candidate->count != current->count) return candidate->count > current->count;
+  if (o->quality_aware){
+    if (candidate->mean_qual > current->mean_qual) return 1;
+    if (candidate->mean_qual < current->mean_qual) return 0;
+  }
+  return strcmp(candidate->umi, current->umi) < 0;
+}
+
 static const char* merge_reason(const map_item_t* item){
   if (!item) return "unknown";
   if (item->hamming == 0 || strcmp(item->raw_umi, item->corr_umi) == 0) return "self";
@@ -436,6 +444,7 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam, FIL
     const char* umi_qual = NULL;
     if (is_unmapped(b)) continue;
     const char* umi = get_tag_Z(b, o->umi_tag); if(!umi) continue;
+    const char* cb = get_tag_Z(b, o->cell_tag); if(!cb) continue;
     char* key = build_group_key(b, o->cell_tag, o->gene_tag, o->no_gene, o->locus_bin, o->sj_jitter, o->end_bin); if(!key) continue;
     if (n==cap){ size_t nc=cap*2; pair_t* na=(pair_t*)realloc(arr, sizeof(pair_t)*nc); if(!na){ free_pairs(arr,n); bam_destroy1(b); io_close(&io); return -1; } arr=na; cap=nc; }
     if (use_qual) umi_qual = get_tag_Z(b, o->umi_qual_tag);
@@ -497,9 +506,7 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam, FIL
     }
     int* rep=(int*)malloc(sizeof(int)*uc_n); if(!rep){ uf_free(&uf); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; } for(int idx=0; idx<uc_n; ++idx) rep[idx]=-1;
     for (int idx=0; idx<uc_n; ++idx){ int root=uf_find(&uf, idx);
-      if (rep[root]==-1 || uc[idx].count > uc[rep[root]].count ||
-         (o->quality_aware && uc[idx].count==uc[rep[root]].count && uc[idx].mean_qual > uc[rep[root]].mean_qual) ||
-         (uc[idx].count==uc[rep[root]].count && uc[idx].mean_qual == uc[rep[root]].mean_qual && strcmp(uc[idx].umi, uc[rep[root]].umi)<0)){ rep[root]=idx; } }
+      if (better_representative(o, &uc[idx], rep[root] == -1 ? NULL : &uc[rep[root]])){ rep[root]=idx; } }
     map_item_t* items=(map_item_t*)calloc((size_t)uc_n, sizeof(map_item_t)); int mi_n=0;
     if(!items){ uf_free(&uf); free(rep); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; }
     for (int idx=0; idx<uc_n; ++idx){
@@ -526,7 +533,9 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam, FIL
       }
       items[mi_n].hamming = ham;
       items[mi_n].quality_supported = o->quality_aware && mismatch_q_n > 0 && corr_mq >= 0.0 && raw_mq >= 0.0 && corr_mq > raw_mq;
-      items[mi_n].confidence = compute_merge_confidence(o, &uc[ridx], &uc[idx], ham, corr_mq, raw_mq, mismatch_q_n);
+      items[mi_n].confidence = strcmp(uc[idx].umi, uc[ridx].umi) == 0
+        ? 1.0
+        : compute_merge_confidence(o, &uc[ridx], &uc[idx], ham, corr_mq, raw_mq, mismatch_q_n);
       if (emit_correction_row(explain_fp, arr[i].key, &items[mi_n], bucket_id) != 0){
         free_map_items(items, mi_n + 1);
         uf_free(&uf); free(rep); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1;
@@ -687,12 +696,20 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         if (sam_write1(io.out, io.hdr, b) < 0){ LOG_BUCKET(i, "write fail"); bucket_failed = 1; break; }
         continue;
       }
+      if (!cb) {
+        if (set_tag_Z(b, o->umi_out, raw) < 0){ LOG_BUCKET(i, "failed to set passthrough UMI tag"); bucket_failed = 1; break; }
+        if (set_tag_i(b, o->dup_flag, 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); bucket_failed = 1; break; }
+        if (sam_write1(io.out, io.hdr, b) < 0){ LOG_BUCKET(i, "write fail"); bucket_failed = 1; break; }
+        continue;
+      }
+      char* cb_copy = sdup(cb);
+      if (!cb_copy){ LOG_BUCKET(i, "failed to copy cell barcode"); bucket_failed = 1; break; }
       char* key = build_group_key(b, o->cell_tag, o->gene_tag, o->no_gene, o->locus_bin, o->sj_jitter, o->end_bin);
-      if (!key){ LOG_BUCKET(i, "key build failed"); bucket_failed = 1; break; }
+      if (!key){ LOG_BUCKET(i, "key build failed"); free(cb_copy); bucket_failed = 1; break; }
 
       item = find_in_key_map(km, km_n, key, raw);
       corr = item ? item->corr_umi : raw;
-      if (corr && set_tag_Z(b, o->umi_out, corr) < 0){ LOG_BUCKET(i, "failed to set corrected UMI tag"); free(key); bucket_failed = 1; break; }
+      if (corr && set_tag_Z(b, o->umi_out, corr) < 0){ LOG_BUCKET(i, "failed to set corrected UMI tag"); free(cb_copy); free(key); bucket_failed = 1; break; }
 
       int idx = seen_find(seen, seen_n, key, corr);
       int is_dup = 0;
@@ -703,6 +720,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         int ins = -idx-1;
         if (seen_n==seen_cap){
           if (grow_seen_arrays(&seen, &counts, seen_n, &seen_cap) != 0){
+            free(cb_copy);
             free(key);
             bucket_failed = 1;
             break;
@@ -715,6 +733,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         if (!seen[ins].key || !seen[ins].corr){
           free(seen[ins].key);
           free(seen[ins].corr);
+          free(cb_copy);
           free(key);
           bucket_failed = 1;
           break;
@@ -722,11 +741,12 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         counts[ins]=1; seen_n++;
       }
 
-      if (set_tag_i(b, o->dup_flag, is_dup ? 1 : 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); free(key); bucket_failed = 1; break; }
+      if (set_tag_i(b, o->dup_flag, is_dup ? 1 : 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); free(cb_copy); free(key); bucket_failed = 1; break; }
       if (o->mol_tag){
-        char* mi = build_molecule_id(cb, key, corr);
+        char* mi = build_molecule_id(cb_copy, key, corr);
         if (!mi || set_tag_Z(b, o->mol_tag, mi) < 0){
           free(mi);
+          free(cb_copy);
           free(key);
           LOG_BUCKET(i, "failed to build molecule id");
           bucket_failed = 1;
@@ -736,8 +756,9 @@ static int phase_bucket_dedup(const cli_opts_t* o){
       }
       if (o->emit_tsv && f_asn){
         const char* qn = bam_get_qname(b);
-        char* mi2 = build_molecule_id(cb, key, corr);
+        char* mi2 = build_molecule_id(cb_copy, key, corr);
         if (!mi2){
+          free(cb_copy);
           free(key);
           LOG_BUCKET(i, "failed to build assignment id");
           bucket_failed = 1;
@@ -747,7 +768,8 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         free(mi2);
       }
 
-      if (sam_write1(io.out, io.hdr, b) < 0){ LOG_BUCKET(i, "write fail"); free(key); bucket_failed = 1; break; }
+      if (sam_write1(io.out, io.hdr, b) < 0){ LOG_BUCKET(i, "write fail"); free(cb_copy); free(key); bucket_failed = 1; break; }
+      free(cb_copy);
       free(key);
     }
     if (read_rc < -1){ LOG_BUCKET(i, "read fail"); bucket_failed = 1; }
