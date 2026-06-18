@@ -371,8 +371,7 @@ def main() -> int:
     print("Suggested IsoUMI command:")
     print(
         f"  src/isoumi --bam {sam_path} --out {Path(args.out_dir) / 'isoumi'} "
-        f"--tmp-dir {Path(args.out_dir) / 'tmp'} --threads 1 --buckets 8 "
-        "--ham 1 --ratio 0.60 --emit-tsv --emit-explain"
+        "--threads 1 --buckets 8 --ham 1 --ratio 0.60 --emit-tsv --emit-explain"
     )
     return 0
 

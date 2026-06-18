@@ -2,7 +2,6 @@
 #include "io.h"
 #include "sj.h"
 #include "umi.h"
-#include "uf.h"
 #include "key_build.h"
 #include "key.h"
 #include "vector.h"
@@ -52,13 +51,52 @@ static int ensure_dir(const char* d){
 #else
   int r = mkdir(d, 0775);
 #endif
-  if (r!=0 && errno!=EEXIST){ LOG_PIPELINE("mkdir %s failed", d); return -1; }
+  if (r!=0){
+    if (errno==EEXIST) LOG_PIPELINE("temporary directory already exists: %s", d);
+    else LOG_PIPELINE("mkdir %s failed", d);
+    return -1;
+  }
   return 0;
 }
 static unsigned long hash_cb(const char* s){
   unsigned long h=1469598103934665603ull; if (!s) return 0;
   for (const unsigned char* p=(const unsigned char*)s; *p; ++p){ h ^= *p; h *= 1099511628211ull; }
   return h;
+}
+
+static int input_scope_label(size_t input_idx, char* buf, size_t n){
+  if (!buf || n == 0) return -1;
+  if (snprintf(buf, n, "input%06zu", input_idx) < 0) return -1;
+  return 0;
+}
+
+static const char* active_input_scope_tag(const cli_opts_t* o){
+  return (o && o->isolate_inputs) ? o->input_scope_tag : NULL;
+}
+
+static int set_input_scope_tag(const cli_opts_t* o, bam1_t* b, const char* label){
+  if (!o || !o->isolate_inputs) return 0;
+  if (bam_aux_get(b, o->input_scope_tag)){
+    LOG_PIPELINE("input-scope tag %s already exists; choose a different --input-scope-tag", o->input_scope_tag);
+    return -1;
+  }
+  return set_tag_Z(b, o->input_scope_tag, label);
+}
+
+static int clear_input_scope_tag(const cli_opts_t* o, bam1_t* b){
+  uint8_t* aux;
+  if (!o || !o->isolate_inputs) return 0;
+  aux = bam_aux_get(b, o->input_scope_tag);
+  if (!aux) return 0;
+  return bam_aux_del(b, aux);
+}
+
+static int set_duplicate_status(const cli_opts_t* o, bam1_t* b, int is_dup){
+  if (o->set_bam_dup_flag){
+    if (is_dup) b->core.flag |= BAM_FDUP;
+    else b->core.flag &= ~BAM_FDUP;
+  }
+  return set_tag_i(b, o->dup_flag, is_dup ? 1 : 0);
 }
 
 static int headers_compatible(const bam_hdr_t* a, const bam_hdr_t* b){
@@ -219,9 +257,14 @@ static int phase_split(const cli_opts_t* o){
   if (!b){ bam_hdr_destroy(merged_hdr); close_writers(outs, o->buckets); free(outs); return -1; }
   for (size_t fi=0; fi<o->bam_list.n; ++fi){
     const char* inbam = o->bam_list.data[fi];
+    char input_scope[64];
     samFile* in = sam_open(inbam, "r");
     int read_rc = 0;
     int failed = 0;
+    if (input_scope_label(fi, input_scope, sizeof(input_scope)) != 0){
+      LOG_PIPELINE("[split] failed to build input scope label");
+      bam_destroy1(b); bam_hdr_destroy(merged_hdr); close_writers(outs, o->buckets); free(outs); return -1;
+    }
     if (!in){ LOG_PIPELINE("[split] cannot open %s", inbam); bam_destroy1(b); bam_hdr_destroy(merged_hdr); close_writers(outs, o->buckets); free(outs); return -1; }
     bam_hdr_t* hdr = sam_hdr_read(in);
     if (!hdr){ LOG_PIPELINE("[split] cannot read header %s", inbam); sam_close(in); bam_destroy1(b); bam_hdr_destroy(merged_hdr); close_writers(outs, o->buckets); free(outs); return -1; }
@@ -233,6 +276,7 @@ static int phase_split(const cli_opts_t* o){
       return -1;
     }
     while ((read_rc = sam_read1(in, hdr, b)) >= 0){
+      if (set_input_scope_tag(o, b, input_scope) != 0){ failed = 1; break; }
       const char* cb = get_tag_Z(b, o->cell_tag);
       unsigned long bid = hash_cb(cb) % (unsigned long)o->buckets;
       if (sam_write1(outs[bid], merged_hdr, b) < 0){ LOG_PIPELINE("[split] write fail for bucket %lu", bid); failed = 1; break; }
@@ -264,6 +308,14 @@ typedef struct {
   int umi_len;
   int has_qual;
 } umi_stat_t;
+typedef struct {
+  int rep_idx;
+  int hamming;
+  double corr_mismatch_q;
+  double raw_mismatch_q;
+  double confidence;
+  int mismatch_q_n;
+} umi_assignment_t;
 static int cmp_umi_stat_desc(const void* a, const void* b){
   const umi_stat_t* x=(const umi_stat_t*)a;
   const umi_stat_t* y=(const umi_stat_t*)b;
@@ -274,10 +326,10 @@ typedef struct {
   char* raw_umi;
   char* corr_umi;
   int raw_count;
-  int corr_count;
+  int seed_count;
   int hamming;
   double raw_avgq;
-  double corr_avgq;
+  double seed_avgq;
   double confidence;
   int quality_supported;
 } map_item_t;
@@ -416,6 +468,72 @@ static int better_representative(const cli_opts_t* o, const umi_stat_t* candidat
   return strcmp(candidate->umi, current->umi) < 0;
 }
 
+static int can_assign_to_seed(const cli_opts_t* o, const umi_stat_t* seed, const umi_stat_t* raw,
+                              umi_assignment_t* out){
+  int ham = 0, mismatch_q_n = 0;
+  double seed_mq = -1.0, raw_mq = -1.0;
+  double conf;
+
+  if (!seed || !raw || seed == raw) return 0;
+  if (seed->count <= 0 || seed->count < raw->count) return 0;
+  if (seed->count == raw->count && !better_representative(o, seed, raw)) return 0;
+  if ((double)raw->count / (double)seed->count > o->ratio) return 0;
+  if (compute_umi_distance_metrics(seed, raw, o->ham, &ham, &seed_mq, &raw_mq, &mismatch_q_n) != 0) return 0;
+
+  conf = compute_merge_confidence(o, seed, raw, ham, seed_mq, raw_mq, mismatch_q_n);
+  if (o->min_merge_confidence > 0.0 && conf < o->min_merge_confidence) return 0;
+
+  if (out){
+    out->hamming = ham;
+    out->corr_mismatch_q = seed_mq;
+    out->raw_mismatch_q = raw_mq;
+    out->confidence = conf;
+    out->mismatch_q_n = mismatch_q_n;
+  }
+  return 1;
+}
+
+static int choose_next_seed(const cli_opts_t* o, const umi_stat_t* stats, int n,
+                            const umi_assignment_t* assignments){
+  int best = -1;
+  for (int i=0; i<n; ++i){
+    if (assignments[i].rep_idx >= 0) continue;
+    if (best < 0 || better_representative(o, &stats[i], &stats[best])) best = i;
+  }
+  return best;
+}
+
+static int build_seed_assignments(const cli_opts_t* o, const umi_stat_t* stats, int n,
+                                  umi_assignment_t** out){
+  umi_assignment_t* assignments = (umi_assignment_t*)calloc((size_t)n, sizeof(umi_assignment_t));
+  if (!assignments) return -1;
+  for (int i=0; i<n; ++i) assignments[i].rep_idx = -1;
+
+  for (;;) {
+    int seed = choose_next_seed(o, stats, n, assignments);
+    if (seed < 0) break;
+
+    assignments[seed].rep_idx = seed;
+    assignments[seed].hamming = 0;
+    assignments[seed].corr_mismatch_q = -1.0;
+    assignments[seed].raw_mismatch_q = -1.0;
+    assignments[seed].confidence = 1.0;
+    assignments[seed].mismatch_q_n = 0;
+
+    for (int idx=0; idx<n; ++idx){
+      umi_assignment_t candidate = {0};
+      if (assignments[idx].rep_idx >= 0 || idx == seed) continue;
+      if (can_assign_to_seed(o, &stats[seed], &stats[idx], &candidate)){
+        candidate.rep_idx = seed;
+        assignments[idx] = candidate;
+      }
+    }
+  }
+
+  *out = assignments;
+  return 0;
+}
+
 static const char* merge_reason(const map_item_t* item){
   if (!item) return "unknown";
   if (item->hamming == 0 || strcmp(item->raw_umi, item->corr_umi) == 0) return "self";
@@ -426,8 +544,8 @@ static const char* merge_reason(const map_item_t* item){
 static int emit_correction_row(FILE* fp, const char* key, const map_item_t* item, int bucket){
   if (!fp || !item) return 0;
   if (fprintf(fp, "%s\t%s\t%s\t%d\t%d\t%d\t%.2f\t%.2f\t%.4f\t%s\t%d\n",
-              key, item->raw_umi, item->corr_umi, item->raw_count, item->corr_count,
-              item->hamming, item->raw_avgq, item->corr_avgq, item->confidence,
+              key, item->raw_umi, item->corr_umi, item->raw_count, item->seed_count,
+              item->hamming, item->raw_avgq, item->seed_avgq, item->confidence,
               merge_reason(item), bucket) < 0){
     return -1;
   }
@@ -445,7 +563,10 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam, FIL
     if (is_unmapped(b)) continue;
     const char* umi = get_tag_Z(b, o->umi_tag); if(!umi) continue;
     const char* cb = get_tag_Z(b, o->cell_tag); if(!cb) continue;
-    char* key = build_group_key(b, o->cell_tag, o->gene_tag, o->no_gene, o->locus_bin, o->sj_jitter, o->end_bin); if(!key) continue;
+    char* key = build_group_key(b, o->cell_tag, o->gene_tag,
+                                o->source_tag, active_input_scope_tag(o),
+                                o->no_gene, o->no_structure,
+                                o->locus_bin, o->sj_jitter, o->end_bin); if(!key) continue;
     if (n==cap){ size_t nc=cap*2; pair_t* na=(pair_t*)realloc(arr, sizeof(pair_t)*nc); if(!na){ free_pairs(arr,n); bam_destroy1(b); io_close(&io); return -1; } arr=na; cap=nc; }
     if (use_qual) umi_qual = get_tag_Z(b, o->umi_qual_tag);
     arr[n].key = key;
@@ -489,65 +610,48 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam, FIL
       uc_n++;
     }
     qsort(uc, uc_n, sizeof(umi_stat_t), cmp_umi_stat_desc);
-    uf_t uf; if (uf_init(&uf, uc_n) != 0){ free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; }
-    for (int a=0; a<uc_n; ++a){
-      for (int b_i=a+1; b_i<uc_n; ++b_i){
-        int ham = 0, mismatch_q_n = 0;
-        double larger_mq = -1.0, smaller_mq = -1.0;
-        double conf;
-        int larger=uc[a].count, smaller=uc[b_i].count;
-        if (larger<=0) continue;
-        if ((double)smaller/(double)larger > o->ratio) continue;
-        if (compute_umi_distance_metrics(&uc[a], &uc[b_i], o->ham, &ham, &larger_mq, &smaller_mq, &mismatch_q_n) != 0) continue;
-        conf = compute_merge_confidence(o, &uc[a], &uc[b_i], ham, larger_mq, smaller_mq, mismatch_q_n);
-        if (o->min_merge_confidence > 0.0 && conf < o->min_merge_confidence) continue;
-        uf_union(&uf, a, b_i);
-      }
+    umi_assignment_t* assignments = NULL;
+    if (build_seed_assignments(o, uc, uc_n, &assignments) != 0){
+      free_umi_stats(uc, uc_n);
+      free_pairs(arr,n);
+      free_key_maps(km, km_n);
+      return -1;
     }
-    int* rep=(int*)malloc(sizeof(int)*uc_n); if(!rep){ uf_free(&uf); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; } for(int idx=0; idx<uc_n; ++idx) rep[idx]=-1;
-    for (int idx=0; idx<uc_n; ++idx){ int root=uf_find(&uf, idx);
-      if (better_representative(o, &uc[idx], rep[root] == -1 ? NULL : &uc[rep[root]])){ rep[root]=idx; } }
     map_item_t* items=(map_item_t*)calloc((size_t)uc_n, sizeof(map_item_t)); int mi_n=0;
-    if(!items){ uf_free(&uf); free(rep); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; }
+    if(!items){ free(assignments); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; }
     for (int idx=0; idx<uc_n; ++idx){
-      int root=uf_find(&uf, idx);
-      int ridx=rep[root];
-      int ham = 0, mismatch_q_n = 0;
-      double corr_mq = -1.0, raw_mq = -1.0;
+      int ridx=assignments[idx].rep_idx;
       items[mi_n].raw_umi=sdup(uc[idx].umi);
       items[mi_n].corr_umi=sdup(uc[ridx].umi);
       if (!items[mi_n].raw_umi || !items[mi_n].corr_umi){
         free(items[mi_n].raw_umi);
         free(items[mi_n].corr_umi);
         free_map_items(items, mi_n);
-        uf_free(&uf); free(rep); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1;
+        free(assignments); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1;
       }
       items[mi_n].raw_count = uc[idx].count;
-      items[mi_n].corr_count = uc[ridx].count;
+      items[mi_n].seed_count = uc[ridx].count;
       items[mi_n].raw_avgq = uc[idx].mean_qual;
-      items[mi_n].corr_avgq = uc[ridx].mean_qual;
-      if (compute_umi_distance_metrics(&uc[ridx], &uc[idx], o->ham, &ham, &corr_mq, &raw_mq, &mismatch_q_n) != 0){
-        ham = strcmp(uc[idx].umi, uc[ridx].umi) == 0 ? 0 : o->ham + 1;
-        corr_mq = raw_mq = -1.0;
-        mismatch_q_n = 0;
-      }
-      items[mi_n].hamming = ham;
-      items[mi_n].quality_supported = o->quality_aware && mismatch_q_n > 0 && corr_mq >= 0.0 && raw_mq >= 0.0 && corr_mq > raw_mq;
-      items[mi_n].confidence = strcmp(uc[idx].umi, uc[ridx].umi) == 0
-        ? 1.0
-        : compute_merge_confidence(o, &uc[ridx], &uc[idx], ham, corr_mq, raw_mq, mismatch_q_n);
+      items[mi_n].seed_avgq = uc[ridx].mean_qual;
+      items[mi_n].hamming = assignments[idx].hamming;
+      items[mi_n].quality_supported = o->quality_aware &&
+        assignments[idx].mismatch_q_n > 0 &&
+        assignments[idx].corr_mismatch_q >= 0.0 &&
+        assignments[idx].raw_mismatch_q >= 0.0 &&
+        assignments[idx].corr_mismatch_q > assignments[idx].raw_mismatch_q;
+      items[mi_n].confidence = assignments[idx].confidence;
       if (emit_correction_row(explain_fp, arr[i].key, &items[mi_n], bucket_id) != 0){
         free_map_items(items, mi_n + 1);
-        uf_free(&uf); free(rep); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1;
+        free(assignments); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1;
       }
       mi_n++;
     }
     qsort(items, mi_n, sizeof(map_item_t), cmp_map_item);
-    if (km_n==km_cap){ int nc=km_cap*2; key_map_t* nk=(key_map_t*)realloc(km,sizeof(key_map_t)*(size_t)nc); if(!nk){ free_map_items(items, mi_n); free(rep); uf_free(&uf); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; } km=nk; km_cap=nc; }
+    if (km_n==km_cap){ int nc=km_cap*2; key_map_t* nk=(key_map_t*)realloc(km,sizeof(key_map_t)*(size_t)nc); if(!nk){ free_map_items(items, mi_n); free(assignments); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; } km=nk; km_cap=nc; }
     km[km_n].key=sdup(arr[i].key);
-    if (!km[km_n].key){ free_map_items(items, mi_n); free(rep); uf_free(&uf); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; }
+    if (!km[km_n].key){ free_map_items(items, mi_n); free(assignments); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; }
     km[km_n].items=items; km[km_n].n=mi_n; km_n++;
-    uf_free(&uf); free(rep); free_umi_stats(uc, uc_n); i=j;
+    free(assignments); free_umi_stats(uc, uc_n); i=j;
   }
   free_pairs(arr,n);
   qsort(km, km_n, sizeof(key_map_t), cmp_key_map);
@@ -565,17 +669,34 @@ static const map_item_t* find_in_key_map(const key_map_t* km, int km_n, const ch
   return NULL;
 }
 
-typedef struct { char* key; char* corr; } seen_t;
-static int seen_cmp(const void* a, const void* b){ const seen_t* x=(const seen_t*)a; const seen_t* y=(const seen_t*)b; int c=strcmp(x->key,y->key); if(c) return c; return strcmp(x->corr,y->corr); }
-static int seen_find(seen_t* arr, int n, const char* key, const char* corr){
-  int lo=0, hi=n-1; seen_t tmp={(char*)key,(char*)corr};
-  while(lo<=hi){ int mid=(lo+hi)/2; int c=seen_cmp(&tmp,&arr[mid]); if(c==0) return mid; if(c<0) hi=mid-1; else lo=mid+1; }
+typedef struct {
+  char* key;
+  char* corr;
+  int count;
+  long best_ordinal;
+  int best_mapq;
+  int best_ref_span;
+  int best_query_len;
+} molecule_t;
+static int molecule_cmp_key(const molecule_t* x, const molecule_t* y){
+  int c=strcmp(x->key,y->key);
+  if(c) return c;
+  return strcmp(x->corr,y->corr);
+}
+static int molecule_find(molecule_t* arr, int n, const char* key, const char* corr){
+  int lo=0, hi=n-1;
+  molecule_t tmp={(char*)key,(char*)corr,0,0,0,0,0};
+  while(lo<=hi){
+    int mid=(lo+hi)/2;
+    int c=molecule_cmp_key(&tmp,&arr[mid]);
+    if(c==0) return mid;
+    if(c<0) hi=mid-1; else lo=mid+1;
+  }
   return -lo-1;
 }
-static void free_seen(seen_t* seen, int* counts, int seen_n){
-  for (int s=0;s<seen_n;++s){ free(seen[s].key); free(seen[s].corr); }
-  free(seen);
-  free(counts);
+static void free_molecules(molecule_t* mols, int mol_n){
+  for (int s=0;s<mol_n;++s){ free(mols[s].key); free(mols[s].corr); }
+  free(mols);
 }
 static char* build_molecule_id(const char* cb, const char* key, const char* corr){
   const char* cbv = cb ? cb : "NA";
@@ -589,26 +710,139 @@ static char* build_molecule_id(const char* cb, const char* key, const char* corr
   return out;
 }
 
-static int grow_seen_arrays(seen_t** seen, int** counts, int seen_n, int* seen_cap){
-  int nc = *seen_cap ? (*seen_cap * 2) : 1024;
-  seen_t* new_seen = (seen_t*)malloc(sizeof(seen_t) * (size_t)nc);
-  int* new_counts = (int*)malloc(sizeof(int) * (size_t)nc);
-  if (!new_seen || !new_counts){
-    free(new_seen);
-    free(new_counts);
+static int grow_molecule_array(molecule_t** mols, int mol_n, int* mol_cap){
+  int nc = *mol_cap ? (*mol_cap * 2) : 1024;
+  molecule_t* new_mols = (molecule_t*)malloc(sizeof(molecule_t) * (size_t)nc);
+  if (!new_mols){
     return -1;
   }
-  if (*seen){
-    memcpy(new_seen, *seen, sizeof(seen_t) * (size_t)seen_n);
-    free(*seen);
+  if (*mols){
+    memcpy(new_mols, *mols, sizeof(molecule_t) * (size_t)mol_n);
+    free(*mols);
   }
-  if (*counts){
-    memcpy(new_counts, *counts, sizeof(int) * (size_t)seen_n);
-    free(*counts);
+  *mols = new_mols;
+  *mol_cap = nc;
+  return 0;
+}
+
+static int read_ref_span(const bam1_t* b){
+  int end_pos;
+  if (!b || b->core.pos < 0) return 0;
+  end_pos = bam_endpos(b);
+  return end_pos > b->core.pos ? end_pos - b->core.pos : 0;
+}
+
+static int read_better_for_molecule(const bam1_t* b, long ordinal, const molecule_t* mol){
+  int mapq = b ? b->core.qual : 0;
+  int ref_span = read_ref_span(b);
+  int query_len = b ? b->core.l_qseq : 0;
+  if (mol->best_ordinal < 0) return 1;
+  if (mapq != mol->best_mapq) return mapq > mol->best_mapq;
+  if (ref_span != mol->best_ref_span) return ref_span > mol->best_ref_span;
+  if (query_len != mol->best_query_len) return query_len > mol->best_query_len;
+  return ordinal < mol->best_ordinal;
+}
+
+static void set_molecule_best_read(molecule_t* mol, const bam1_t* b, long ordinal){
+  mol->best_ordinal = ordinal;
+  mol->best_mapq = b ? b->core.qual : 0;
+  mol->best_ref_span = read_ref_span(b);
+  mol->best_query_len = b ? b->core.l_qseq : 0;
+}
+
+static int upsert_molecule(molecule_t** mols, int* mol_n, int* mol_cap,
+                           const char* key, const char* corr, const bam1_t* b, long ordinal){
+  int idx = molecule_find(*mols, *mol_n, key, corr);
+  if (idx >= 0){
+    (*mols)[idx].count++;
+    if (read_better_for_molecule(b, ordinal, &(*mols)[idx])){
+      set_molecule_best_read(&(*mols)[idx], b, ordinal);
+    }
+    return 0;
   }
-  *seen = new_seen;
-  *counts = new_counts;
-  *seen_cap = nc;
+
+  int ins = -idx - 1;
+  char* key_copy = sdup(key);
+  char* corr_copy = sdup(corr);
+  if (!key_copy || !corr_copy){
+    free(key_copy);
+    free(corr_copy);
+    return -1;
+  }
+  if (*mol_n == *mol_cap){
+    if (grow_molecule_array(mols, *mol_n, mol_cap) != 0){
+      free(key_copy);
+      free(corr_copy);
+      return -1;
+    }
+  }
+  memmove(*mols + ins + 1, *mols + ins, sizeof(molecule_t) * (size_t)(*mol_n - ins));
+  (*mols)[ins].key = key_copy;
+  (*mols)[ins].corr = corr_copy;
+  (*mols)[ins].count = 1;
+  (*mols)[ins].best_ordinal = -1;
+  (*mols)[ins].best_mapq = 0;
+  (*mols)[ins].best_ref_span = 0;
+  (*mols)[ins].best_query_len = 0;
+  set_molecule_best_read(&(*mols)[ins], b, ordinal);
+  (*mol_n)++;
+  return 0;
+}
+
+static int build_bucket_molecules(const cli_opts_t* o, const char* bucket_bam,
+                                  const key_map_t* km, int km_n,
+                                  molecule_t** out_mols, int* out_n){
+  io_ctx_t io;
+  bam1_t* b = NULL;
+  molecule_t* mols = NULL;
+  int mol_n = 0, mol_cap = 0;
+  long ordinal = 0;
+  int read_rc = 0;
+
+  if (io_open(bucket_bam, NULL, &io) != 0) return -1;
+  b = bam_init1();
+  if (!b){ io_close(&io); return -1; }
+
+  while ((read_rc = sam_read1(io.in, io.hdr, b)) >= 0){
+    const char* raw = get_tag_Z(b, o->umi_tag);
+    const char* cb = get_tag_Z(b, o->cell_tag);
+    if (!is_unmapped(b) && raw && cb){
+      char* key = build_group_key(b, o->cell_tag, o->gene_tag,
+                                  o->source_tag, active_input_scope_tag(o),
+                                  o->no_gene, o->no_structure,
+                                  o->locus_bin, o->sj_jitter, o->end_bin);
+      const map_item_t* item = NULL;
+      const char* corr = NULL;
+      if (!key){
+        free_molecules(mols, mol_n);
+        bam_destroy1(b);
+        io_close(&io);
+        return -1;
+      }
+      item = find_in_key_map(km, km_n, key, raw);
+      corr = item ? item->corr_umi : raw;
+      if (upsert_molecule(&mols, &mol_n, &mol_cap, key, corr, b, ordinal) != 0){
+        free(key);
+        free_molecules(mols, mol_n);
+        bam_destroy1(b);
+        io_close(&io);
+        return -1;
+      }
+      free(key);
+    }
+    ordinal++;
+  }
+  if (read_rc < -1){
+    free_molecules(mols, mol_n);
+    bam_destroy1(b);
+    io_close(&io);
+    return -1;
+  }
+
+  bam_destroy1(b);
+  io_close(&io);
+  *out_mols = mols;
+  *out_n = mol_n;
   return 0;
 }
 
@@ -624,6 +858,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
     snprintf(corrf, sizeof(corrf), "%s/bucket_%05d.corrections.tsv", o->tmp_dir, i);
 
     key_map_t* km=NULL; int km_n=0;
+    molecule_t* mols=NULL; int mol_n=0;
     int bucket_failed = 0;
     FILE* f_corr = NULL;
     if (o->emit_explain){
@@ -633,7 +868,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         status |= 1;
         continue;
       }
-      fprintf(f_corr, "key\traw_umi\tcorr_umi\traw_count\tcorr_count\thamming\traw_avgq\tcorr_avgq\tconfidence\treason\tbucket\n");
+      fprintf(f_corr, "key\traw_umi\tcorr_umi\traw_count\tseed_count\thamming\traw_avgq\tseed_avgq\tconfidence\treason\tbucket\n");
     }
     if (build_bucket_mapping(o, ib, f_corr, i, &km, &km_n)!=0){
       if (f_corr){ fclose(f_corr); remove(corrf); }
@@ -643,10 +878,19 @@ static int phase_bucket_dedup(const cli_opts_t* o){
     }
     if (f_corr) fclose(f_corr);
 
+    if (build_bucket_molecules(o, ib, km, km_n, &mols, &mol_n) != 0){
+      LOG_BUCKET(i, "molecule representative selection failed");
+      if (o->emit_explain){ remove(corrf); }
+      free_key_maps(km, km_n);
+      status |= 1;
+      continue;
+    }
+
     io_ctx_t io = {0};
     if (io_open(ib, ob, &io) != 0){
       LOG_BUCKET(i, "open failed");
       if (o->emit_explain){ remove(corrf); }
+      free_molecules(mols, mol_n);
       free_key_maps(km, km_n);
       status |= 1;
       continue;
@@ -665,83 +909,63 @@ static int phase_bucket_dedup(const cli_opts_t* o){
       }
     }
 
-    seen_t* seen=NULL; int seen_n=0, seen_cap=0;
-    int* counts=NULL;
     bam1_t* b = bam_init1();
     if (!b){
       if (f_mol) fclose(f_mol);
       if (f_asn) fclose(f_asn);
       if (o->emit_explain){ remove(corrf); }
       io_close(&io);
+      free_molecules(mols, mol_n);
       free_key_maps(km, km_n);
       status |= 1;
       LOG_BUCKET(i, "out of memory allocating BAM record");
       continue;
     }
     int read_rc = 0;
+    long ordinal = 0;
 
     while (!bucket_failed && (read_rc = sam_read1(io.in, io.hdr, b)) >= 0){
+      long current_ordinal = ordinal++;
       const char* raw = get_tag_Z(b, o->umi_tag);
       const char* cb  = get_tag_Z(b, o->cell_tag);
       const map_item_t* item = NULL;
       const char* corr = NULL;
       if (is_unmapped(b)) {
         if (raw && set_tag_Z(b, o->umi_out, raw) < 0){ LOG_BUCKET(i, "failed to set passthrough UMI tag"); bucket_failed = 1; break; }
-        if (set_tag_i(b, o->dup_flag, 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); bucket_failed = 1; break; }
+        if (set_duplicate_status(o, b, 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); bucket_failed = 1; break; }
+        if (clear_input_scope_tag(o, b) < 0){ LOG_BUCKET(i, "failed to remove input scope tag"); bucket_failed = 1; break; }
         if (sam_write1(io.out, io.hdr, b) < 0){ LOG_BUCKET(i, "write fail"); bucket_failed = 1; break; }
         continue;
       }
       if (!raw) {
-        if (set_tag_i(b, o->dup_flag, 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); bucket_failed = 1; break; }
+        if (set_duplicate_status(o, b, 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); bucket_failed = 1; break; }
+        if (clear_input_scope_tag(o, b) < 0){ LOG_BUCKET(i, "failed to remove input scope tag"); bucket_failed = 1; break; }
         if (sam_write1(io.out, io.hdr, b) < 0){ LOG_BUCKET(i, "write fail"); bucket_failed = 1; break; }
         continue;
       }
       if (!cb) {
         if (set_tag_Z(b, o->umi_out, raw) < 0){ LOG_BUCKET(i, "failed to set passthrough UMI tag"); bucket_failed = 1; break; }
-        if (set_tag_i(b, o->dup_flag, 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); bucket_failed = 1; break; }
+        if (set_duplicate_status(o, b, 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); bucket_failed = 1; break; }
+        if (clear_input_scope_tag(o, b) < 0){ LOG_BUCKET(i, "failed to remove input scope tag"); bucket_failed = 1; break; }
         if (sam_write1(io.out, io.hdr, b) < 0){ LOG_BUCKET(i, "write fail"); bucket_failed = 1; break; }
         continue;
       }
       char* cb_copy = sdup(cb);
       if (!cb_copy){ LOG_BUCKET(i, "failed to copy cell barcode"); bucket_failed = 1; break; }
-      char* key = build_group_key(b, o->cell_tag, o->gene_tag, o->no_gene, o->locus_bin, o->sj_jitter, o->end_bin);
+      char* key = build_group_key(b, o->cell_tag, o->gene_tag,
+                                  o->source_tag, active_input_scope_tag(o),
+                                  o->no_gene, o->no_structure,
+                                  o->locus_bin, o->sj_jitter, o->end_bin);
       if (!key){ LOG_BUCKET(i, "key build failed"); free(cb_copy); bucket_failed = 1; break; }
 
       item = find_in_key_map(km, km_n, key, raw);
       corr = item ? item->corr_umi : raw;
       if (corr && set_tag_Z(b, o->umi_out, corr) < 0){ LOG_BUCKET(i, "failed to set corrected UMI tag"); free(cb_copy); free(key); bucket_failed = 1; break; }
 
-      int idx = seen_find(seen, seen_n, key, corr);
-      int is_dup = 0;
-      if (idx>=0){
-        counts[idx]++;
-        is_dup = 1;
-      } else {
-        int ins = -idx-1;
-        if (seen_n==seen_cap){
-          if (grow_seen_arrays(&seen, &counts, seen_n, &seen_cap) != 0){
-            free(cb_copy);
-            free(key);
-            bucket_failed = 1;
-            break;
-          }
-        }
-        memmove(seen + ins + 1, seen + ins, sizeof(seen_t)*(seen_n - ins));
-        memmove(counts + ins + 1, counts + ins, sizeof(int)*(seen_n - ins));
-        seen[ins].key = sdup(key);
-        seen[ins].corr = sdup(corr);
-        if (!seen[ins].key || !seen[ins].corr){
-          free(seen[ins].key);
-          free(seen[ins].corr);
-          free(cb_copy);
-          free(key);
-          bucket_failed = 1;
-          break;
-        }
-        counts[ins]=1; seen_n++;
-      }
+      int idx = molecule_find(mols, mol_n, key, corr);
+      int is_dup = (idx >= 0 && mols[idx].best_ordinal != current_ordinal) ? 1 : 0;
 
-      if (set_tag_i(b, o->dup_flag, is_dup ? 1 : 0) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); free(cb_copy); free(key); bucket_failed = 1; break; }
+      if (set_duplicate_status(o, b, is_dup) < 0){ LOG_BUCKET(i, "failed to set duplicate tag"); free(cb_copy); free(key); bucket_failed = 1; break; }
       if (o->mol_tag){
         char* mi = build_molecule_id(cb_copy, key, corr);
         if (!mi || set_tag_Z(b, o->mol_tag, mi) < 0){
@@ -768,6 +992,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         free(mi2);
       }
 
+      if (clear_input_scope_tag(o, b) < 0){ LOG_BUCKET(i, "failed to remove input scope tag"); free(cb_copy); free(key); bucket_failed = 1; break; }
       if (sam_write1(io.out, io.hdr, b) < 0){ LOG_BUCKET(i, "write fail"); free(cb_copy); free(key); bucket_failed = 1; break; }
       free(cb_copy);
       free(key);
@@ -776,15 +1001,15 @@ static int phase_bucket_dedup(const cli_opts_t* o){
     bam_destroy1(b); io_close(&io);
 
     if (!bucket_failed && o->emit_tsv && f_mol){
-      for (int t=0;t<seen_n;++t){
-        fprintf(f_mol, "%s\t%s\t%d\t%d\n", seen[t].key, seen[t].corr, counts[t], i);
+      for (int t=0;t<mol_n;++t){
+        fprintf(f_mol, "%s\t%s\t%d\t%d\n", mols[t].key, mols[t].corr, mols[t].count, i);
       }
     }
     if (f_mol) fclose(f_mol);
     if (f_asn) fclose(f_asn);
 
     free_key_maps(km, km_n);
-    free_seen(seen, counts, seen_n);
+    free_molecules(mols, mol_n);
 
     if (bucket_failed){
       remove(ob);
@@ -880,6 +1105,11 @@ static int concat_reports(const cli_opts_t* o){
 int run_pipeline(const cli_opts_t* o){
   LOG_PIPELINE("Phase 1: split into %d buckets at %s", o->buckets, o->tmp_dir);
   if (phase_split(o)!=0) return -1;
+#ifndef _OPENMP
+  if (o->threads > 1){
+    LOG_PIPELINE("OpenMP support is not enabled in this build; bucket processing will run serially despite --threads=%d", o->threads);
+  }
+#endif
   LOG_PIPELINE("Phase 2: per-bucket dedup (threads=%d)", o->threads);
   if (phase_bucket_dedup(o)!=0) return -1;
   LOG_PIPELINE("Phase 3: concat into %s.dedup.bam", o->out_prefix);

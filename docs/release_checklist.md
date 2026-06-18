@@ -16,8 +16,12 @@ Use this checklist before tagging a release for manuscript submission.
 make clean
 make
 make test
+make check-release
 sh examples/run_minimal.sh
 ```
+
+`make check-release` runs the strict metadata gate and fails until placeholder
+repository URLs and archive DOI text have been replaced.
 
 ## Manuscript Artifacts
 

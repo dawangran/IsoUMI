@@ -8,7 +8,7 @@ test:
 	sh scripts/check_release.sh
 
 check-release:
-	sh scripts/check_release.sh
+	REQUIRE_PUBLICATION_METADATA=1 sh scripts/check_release.sh
 
 clean:
 	$(MAKE) -C src clean

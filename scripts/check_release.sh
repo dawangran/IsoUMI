@@ -27,4 +27,15 @@ if grep -n "$stale_name_upper\|$stale_name_lower\|$stale_version_prefix" $text_p
   exit 1
 fi
 
+publication_metadata_paths='README.md CITATION.cff docs/application_note.md docs/release_checklist.md'
+placeholder_pattern='github[.]com/your-org\|to be added after release\|update `CITATION[.]cff`\|add the Zenodo or institutional archive DOI'
+
+if grep -n "$placeholder_pattern" $publication_metadata_paths 2>/dev/null; then
+  if [ "${REQUIRE_PUBLICATION_METADATA:-0}" = "1" ]; then
+    echo "Found placeholder publication metadata; replace repository URL and archive DOI before release" >&2
+    exit 1
+  fi
+  echo "WARNING: placeholder publication metadata remains; run make check-release before submission" >&2
+fi
+
 printf '%s\n' "Release metadata check passed for $expected_version"
