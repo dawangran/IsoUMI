@@ -10,7 +10,11 @@ static inline uint64_t hash_u32pair(uint64_t h, uint32_t a, uint32_t b){
   for (int i=0;i<4;++i){ h ^= p[i]; h *= 1099511628211ull; }
   return h;
 }
-static inline int round_by_jitter(int x, int j){ if (j<=1) return x; int r = (x / j) * j; return r; }
+static inline int round_by_jitter(int x, int j){
+  if (j<=1) return x;
+  if (x>=0) return ((x + j/2) / j) * j;
+  return ((x - j/2) / j) * j;
+}
 
 int build_sj_or_locus(bam1_t* b, int locus_bin, int sj_jitter, int* is_spliced,
                       uint64_t* sj_hash_out, uint64_t* locus_hash_out) {

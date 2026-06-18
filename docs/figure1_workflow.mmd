@@ -1,0 +1,77 @@
+flowchart LR
+  subgraph A["A. Tagged long-read single-cell BAM"]
+    A1["Read records"]
+    A2["CB cell barcode"]
+    A3["UR raw UMI"]
+    A4["UY UMI quality"]
+    A5["GX gene tag"]
+    A1 --> A2
+    A1 --> A3
+    A1 --> A4
+    A1 --> A5
+  end
+
+  subgraph B["B. Cell-bucket sharding"]
+    B1["Hash CB"]
+    B2["Bucket 00000"]
+    B3["Bucket 00001"]
+    B4["Bucket 000NN"]
+    B1 --> B2
+    B1 --> B3
+    B1 --> B4
+  end
+
+  subgraph C["C. Transcript-context grouping"]
+    C1["Cell + gene + target + strand"]
+    C2["Spliced read: SJ hash"]
+    C3["Non-spliced read: locus hash"]
+    C4["Optional E5/E3 bins"]
+    C5["--no-structure baseline"]
+    C1 --> C2
+    C1 --> C3
+    C2 --> C4
+    C3 --> C4
+    C1 -. "baseline omits structure" .-> C5
+  end
+
+  subgraph D["D. Seed-based UMI correction"]
+    D1["Count UMIs per context"]
+    D2["Choose strongest seed"]
+    D3["Direct filters: ham, ratio, confidence"]
+    D4["Correct raw UMI to seed"]
+    D5["Leave unsupported UMI unchanged"]
+    D1 --> D2
+    D2 --> D3
+    D3 --> D4
+    D3 --> D5
+  end
+
+  subgraph E["E. Representative read selection"]
+    E1["Corrected molecule"]
+    E2["Select best read"]
+    E3["MAPQ"]
+    E4["Aligned span"]
+    E5["Query length"]
+    E6["DA=0 representative"]
+    E7["DA=1 duplicate"]
+    E1 --> E2
+    E2 --> E3
+    E2 --> E4
+    E2 --> E5
+    E2 --> E6
+    E1 --> E7
+  end
+
+  subgraph F["F. Outputs and evaluation"]
+    F1["Corrected BAM"]
+    F2["molecules.tsv"]
+    F3["assignments.tsv"]
+    F4["corrections.tsv"]
+    F5["Default vs --no-structure"]
+    F1 --> F2
+    F1 --> F3
+    F1 --> F4
+    F2 --> F5
+  end
+
+  A --> B --> C --> D --> E --> F

@@ -8,7 +8,6 @@ mkdir -p "$out_dir"
 "$repo_dir/src/isoumi" \
   --bam "$repo_dir/examples/minimal.sam" \
   --out "$out_dir/minimal" \
-  --tmp-dir "$out_dir/buckets" \
   --threads 1 \
   --buckets 4 \
   --ham 1 \

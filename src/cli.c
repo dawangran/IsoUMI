@@ -8,6 +8,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
 
 static const char* ISOUMI_VERSION = "IsoUMI 0.1.0";
 
@@ -101,31 +107,36 @@ static void usage(void){
 "PERFORMANCE & SHARDING:\n"
 "  --threads <INT>        Worker threads for per-bucket step (default: 4)\n"
 "  --buckets <INT>        Number of CB buckets (default: 64)\n"
-"  --tmp-dir <DIR>        Bucket directory (default: tmp_buckets)\n"
+"  --tmp-dir <DIR>        Bucket directory (default: <out>.isoumi.tmp.<pid>)\n"
 "\n"
 "TAG NAMES (10x-style defaults):\n"
 "  --cell-tag <TAG>       Cell barcode tag (default: CB)\n"
 "  --umi-tag  <TAG>       Raw UMI tag (default: UR)\n"
 "  --umi-qual-tag <TAG>   UMI quality tag (default: UY)\n"
 "  --gene-tag <TAG>       Gene tag (default: GX). Use --no-gene to ignore gene\n"
+"  --source-tag <TAG>     Existing source tag to include in grouping (for example RG)\n"
 "  --umi-out <TAG>        Corrected UMI tag to write (default: UB)\n"
 "  --dup-flag <TAG>       Duplicate flag tag (i32 0/1) (default: DA)\n"
 "  --mol-tag <TAG>        Optional; write molecule id (CB|key|UMIcorr)\n"
 "\n"
 "CORRECTION SETTINGS:\n"
 "  --ham <INT>            Max Hamming distance (default: 1)\n"
-"  --ratio <FLOAT>        Collapse if smaller/larger <= ratio (default: 0.10)\n"
+"  --ratio <FLOAT>        Collapse if smaller/larger <= ratio, range 0..1 (default: 0.10)\n"
 "  --min-merge-confidence <FLOAT>\n"
 "                         Optional confidence floor for quality-aware merges (default: 0.00)\n"
 "  --no-quality-aware     Ignore UMI quality when ranking/explaining merges\n"
 "  --no-gene              Ignore gene in grouping\n"
+"  --no-structure         Baseline mode: ignore SJ/locus/end structure in grouping\n"
+"  --isolate-inputs       Treat each input file/list entry as a separate source\n"
+"  --input-scope-tag <TAG> Temporary tag for --isolate-inputs (default: zi)\n"
 "  --locus-bin <INT>      Bin (bp) for non-spliced reads (default: 1000)\n"
-"  --sj-jitter <INT>      Round SJ boundaries by this jitter (bp) before hashing (default: 10)\n"
+"  --sj-jitter <INT>      Round SJ boundaries to nearest jitter multiple before hashing (default: 10)\n"
 "  --end-bin <INT>        Add strand-aware transcript end bins to grouping key (default: off)\n"
 "\n"
 "OUTPUTS:\n"
 "  --emit-tsv             Also write <out>.molecules.tsv and <out>.assignments.tsv\n"
 "  --emit-explain         Also write <out>.corrections.tsv with merge confidence/details\n"
+"  --no-bam-dup-flag      Do not set/clear the standard SAM duplicate bit\n"
 "  --keep-tmp             Keep bucket temp files (default: delete after finish)\n"
 "\n"
 "HELP:\n"
@@ -137,17 +148,20 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
   memset(o, 0, sizeof(*o));
   strvec_init(&o->bam_list);
   o->out_prefix = NULL;
-  o->tmp_dir = xstrdup("tmp_buckets");
+  o->tmp_dir = NULL;
   o->buckets = 64;
   o->threads = 4;
   o->cell_tag = xstrdup("CB");
   o->umi_tag  = xstrdup("UR");
   o->umi_qual_tag = xstrdup("UY");
   o->gene_tag = xstrdup("GX");
+  o->source_tag = NULL;
   o->umi_out  = xstrdup("UB");
   o->dup_flag = xstrdup("DA");
   o->mol_tag  = NULL;
+  o->input_scope_tag = xstrdup("zi");
   o->no_gene = 0;
+  o->no_structure = 0;
   o->ham = 1;
   o->ratio = 0.1;
   o->min_merge_confidence = 0.0;
@@ -158,8 +172,10 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
   o->emit_explain = 0;
   o->quality_aware = 1;
   o->keep_tmp = 0;
+  o->isolate_inputs = 0;
+  o->set_bam_dup_flag = 1;
 
-  if (!o->tmp_dir || !o->cell_tag || !o->umi_tag || !o->umi_qual_tag || !o->gene_tag || !o->umi_out || !o->dup_flag){
+  if (!o->cell_tag || !o->umi_tag || !o->umi_qual_tag || !o->gene_tag || !o->umi_out || !o->dup_flag || !o->input_scope_tag){
     fprintf(stderr, "out of memory while initializing defaults\n");
     return -1;
   }
@@ -191,6 +207,11 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
     {"emit-explain", no_argument, 0, 21},
     {"end-bin", required_argument, 0, 22},
     {"no-quality-aware", no_argument, 0, 23},
+    {"no-structure", no_argument, 0, 24},
+    {"source-tag", required_argument, 0, 25},
+    {"isolate-inputs", no_argument, 0, 26},
+    {"input-scope-tag", required_argument, 0, 27},
+    {"no-bam-dup-flag", no_argument, 0, 28},
     {0,0,0,0}
   };
 
@@ -252,6 +273,10 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
         break;
       case 14:
         if (parse_double_opt("--ratio", optarg, 0.0, &o->ratio) != 0) return -1;
+        if (o->ratio > 1.0){
+          fprintf(stderr, "--ratio must be <= 1.0\n");
+          return -1;
+        }
         break;
       case 15:
         if (parse_int_opt("--locus-bin", optarg, 1, &o->locus_bin) != 0) return -1;
@@ -275,12 +300,34 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
         if (parse_int_opt("--end-bin", optarg, 1, &o->end_bin) != 0) return -1;
         break;
       case 23: o->quality_aware=0; break;
+      case 24: o->no_structure=1; break;
+      case 25:
+        if (set_tag_opt(&o->source_tag, "--source-tag", optarg) != 0) return -1;
+        break;
+      case 26: o->isolate_inputs=1; break;
+      case 27:
+        if (set_tag_opt(&o->input_scope_tag, "--input-scope-tag", optarg) != 0) return -1;
+        break;
+      case 28: o->set_bam_dup_flag=0; break;
       default: usage(); return -1;
     }
   }
 
   if (!o->out_prefix){ fprintf(stderr,"--out is required\n"); usage(); return -1; }
   if (o->bam_list.n==0){ fprintf(stderr,"no BAM inputs (use --bam or --bam-list)\n"); usage(); return -1; }
+  if (!o->tmp_dir){
+    int need = snprintf(NULL, 0, "%s.isoumi.tmp.%ld", o->out_prefix, (long)getpid());
+    if (need < 0){
+      fprintf(stderr, "failed to build default tmp-dir\n");
+      return -1;
+    }
+    o->tmp_dir = (char*)malloc((size_t)need + 1);
+    if (!o->tmp_dir){
+      fprintf(stderr, "out of memory while setting default tmp-dir\n");
+      return -1;
+    }
+    snprintf(o->tmp_dir, (size_t)need + 1, "%s.isoumi.tmp.%ld", o->out_prefix, (long)getpid());
+  }
   return 0;
 }
 
@@ -289,7 +336,8 @@ void free_opts(cli_opts_t *o){
   free(o->out_prefix);
   free(o->tmp_dir);
   free(o->cell_tag); free(o->umi_tag); free(o->umi_qual_tag); free(o->gene_tag);
+  free(o->source_tag);
   free(o->umi_out);  free(o->dup_flag);
-  free(o->mol_tag);
+  free(o->mol_tag); free(o->input_scope_tag);
   strvec_free(&o->bam_list);
 }

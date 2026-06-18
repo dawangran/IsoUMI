@@ -9,7 +9,14 @@ OPENMP_CFLAGS ?= -fopenmp
 OPENMP_LDFLAGS ?= -fopenmp
 endif
 
-CFLAGS ?= -O3 -march=native -Wall -Wextra -std=c11 $(OPENMP_CFLAGS)
+NATIVE ?= 0
+ifeq ($(NATIVE),1)
+NATIVE_CFLAGS ?= -march=native
+else
+NATIVE_CFLAGS ?=
+endif
+
+CFLAGS ?= -O3 $(NATIVE_CFLAGS) -Wall -Wextra -std=c11 $(OPENMP_CFLAGS)
 LDFLAGS ?= $(OPENMP_LDFLAGS)
 EXTRA_CFLAGS ?=
 EXTRA_LDFLAGS ?=
@@ -58,6 +65,8 @@ $(BIN): $(OBJS)
 
 test: $(BIN)
 	sh ../tests/smoke.sh ./$(BIN)
+	sh ../tests/synthetic_truth.sh ./$(BIN)
+	sh ../tests/bam_tags.sh ./$(BIN)
 
 clean:
 	rm -f $(OBJS) $(BIN)
