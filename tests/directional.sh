@@ -26,6 +26,8 @@ d001	0	chr1	101	60	10M	*	0	0	ACGTACGTAA	FFFFFFFFFF	CB:Z:CELL1	UR:Z:AAAA	UY:Z:III
 SAM
 
 "$bin" --help 2>&1 | grep -q -- '--correction-method <ratio|directional>'
+"$bin" --help 2>&1 | grep -q -- '--ratio.*ignored by directional'
+"$bin" --help 2>&1 | grep -q -- '--min-merge-confidence.*Ratio mode only'
 
 if "$bin" --bam "$tmpdir/input.sam" --out "$tmpdir/bad" \
     --correction-method unknown >"$tmpdir/bad.stdout" 2>"$tmpdir/bad.stderr"; then
@@ -53,10 +55,11 @@ append_umi_reads() {
   cell=$1
   umi=$2
   count=$3
+  qual=${4:-IIII}
   i=1
   while [ "$i" -le "$count" ]; do
-    printf 'g%03d\t0\tchr1\t101\t60\t10M\t*\t0\t0\tACGTACGTAA\tFFFFFFFFFF\tCB:Z:%s\tUR:Z:%s\tUY:Z:IIII\tGX:Z:GENE1\n' \
-      "$next_read" "$cell" "$umi" >> "$tmpdir/graph.sam"
+    printf 'g%03d\t0\tchr1\t101\t60\t10M\t*\t0\t0\tACGTACGTAA\tFFFFFFFFFF\tCB:Z:%s\tUR:Z:%s\tUY:Z:%s\tGX:Z:GENE1\n' \
+      "$next_read" "$cell" "$umi" "$qual" >> "$tmpdir/graph.sam"
     next_read=$((next_read + 1))
     i=$((i + 1))
   done
@@ -72,6 +75,14 @@ append_umi_reads CELL_TIE GGGA 1
 append_umi_reads CELL_TIE GGGG 1
 append_umi_reads CELL_DIRECT TTTT 10
 append_umi_reads CELL_DIRECT TTTA 1
+append_umi_reads CELL_QUALITY CGGA 1 '!!!!'
+append_umi_reads CELL_QUALITY CGGG 1 IIII
+append_umi_reads CELL_LENGTH GCTA 3 IIII
+append_umi_reads CELL_LENGTH GCT 1 III
+append_umi_reads CELL_PARENT ACAC 10
+append_umi_reads CELL_PARENT ACAT 5
+append_umi_reads CELL_PARENT ACTC 5
+append_umi_reads CELL_PARENT ACTT 3
 
 "$bin" \
   --bam "$tmpdir/graph.sam" \
@@ -89,6 +100,7 @@ append_umi_reads CELL_DIRECT TTTA 1
   --buckets 2 \
   --ham 1 \
   --correction-method directional \
+  --ratio 0.00 \
   --emit-tsv \
   --emit-explain >/dev/null
 
@@ -120,3 +132,15 @@ awk -F '\t' 'NR>1 && $2=="TTTA" && $3=="TTTT" && $12=="ratio" && \
   $13=="TTTT" && $14==10 && $15==1 && $16==1 \
   {found=1} END {exit found ? 0 : 1}' \
   "$tmpdir/ratio.corrections.tsv"
+
+awk -F '\t' 'NR>1 && $2=="CGGG" && $3=="CGGA" && $13=="CGGA" \
+  {found=1} END {exit found ? 0 : 1}' \
+  "$tmpdir/directional.corrections.tsv"
+
+awk -F '\t' 'NR>1 && $2=="GCT" && $3=="GCT" && $16==0 \
+  {found=1} END {exit found ? 0 : 1}' \
+  "$tmpdir/directional.corrections.tsv"
+
+awk -F '\t' 'NR>1 && $2=="ACTT" && $3=="ACAC" && $13=="ACAT" && \
+  $14==5 && $15==1 && $16==2 {found=1} END {exit found ? 0 : 1}' \
+  "$tmpdir/directional.corrections.tsv"
