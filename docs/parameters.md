@@ -73,8 +73,10 @@ length to be compared.
 Optional UMI quality string. The string should have the same length as the UMI
 and use Phred+33 characters.
 
-When available, UMI quality contributes to seed ranking and merge-confidence
-scoring. Missing or length-mismatched quality strings are ignored for that UMI.
+When available, UMI quality contributes to ratio-mode seed ranking and
+merge-confidence scoring. In directional mode it can contribute to the reported
+diagnostic edge confidence, but never changes graph membership or seed ranking.
+Missing or length-mismatched quality strings are ignored for that UMI.
 
 ### `--gene-tag <TAG>` default `GX`
 
@@ -244,24 +246,44 @@ Typical choices:
 
 ## UMI Correction Parameters
 
-UMI correction is performed inside each grouping key. Candidate seed UMIs are
-processed from strongest to weakest. A raw UMI is corrected to a seed only when
-that raw-to-seed pair directly satisfies all enabled filters.
+UMI correction is performed inside each grouping key. Select direct ratio
+assignment or directional graph grouping with `--correction-method`.
+
+### `--correction-method <ratio|directional>` default `ratio`
+
+`ratio` preserves the original IsoUMI behavior. Candidate seeds are processed
+from strongest to weakest, and each raw UMI must directly satisfy the Hamming,
+count-ratio, and optional confidence filters against its final seed.
+
+`directional` builds UMI-tools-style directed networks. For two UMIs within the
+Hamming threshold, an edge from a potential parent to a child is allowed when:
+
+```text
+seed_count >= 2 * raw_count - 1
+```
+
+Each unassigned UMI is visited in descending count and lexicographic order and
+becomes the root of all nodes reachable through outgoing edges. This permits
+transitive corrections through decreasing-count chains. The grouping context is
+still IsoUMI's cell/gene/strand/splice-junction or locus context, so results are
+not identical to a standalone UMI-tools run configured with different grouping.
 
 ### `--ham <INT>` default `1`
 
-Maximum Hamming distance between the raw UMI and corrected seed UMI.
+Maximum Hamming distance used for a direct ratio correction or for each edge in
+a directional network.
 
-`--ham 1` means the final reported `raw_umi -> corr_umi` correction must differ
-by at most one position. Chain-based corrections that exceed this direct
-distance are not allowed.
+In ratio mode, `--ham 1` means the final reported `raw_umi -> corr_umi`
+correction differs by at most one position. In directional mode each edge must
+differ by at most one position, but a multi-edge path can produce a final
+raw-to-root `hamming` value greater than one.
 
 Use `0` to disable sequence-error correction while still marking exact-UMI
 duplicates.
 
 ### `--ratio <FLOAT>` default `0.10`, range `0..1`
 
-Maximum allowed support ratio:
+Maximum allowed support ratio for `--correction-method ratio`:
 
 ```text
 raw_count / seed_count <= ratio
@@ -277,11 +299,13 @@ Typical choices:
 - `0.50` or `0.60`: useful for small tests or highly error-prone UMIs
 - `1.00`: permits equal-count correction according to seed ranking
 
+Directional mode accepts this option for command compatibility but ignores it.
+
 ### `--min-merge-confidence <FLOAT>` default `0.00`, range `0..1`
 
-Optional heuristic confidence floor for corrections. The score combines count
-ratio, UMI distance, and optional quality evidence. It is not a posterior
-probability.
+Optional heuristic confidence floor for ratio-mode corrections. The score
+combines count ratio, UMI distance, and optional quality evidence. It is not a
+posterior probability.
 
 Set this above zero when you want a stricter correction policy:
 
@@ -290,10 +314,16 @@ Set this above zero when you want a stricter correction policy:
 --min-merge-confidence 0.60
 ```
 
+A positive value is incompatible with `--correction-method directional` because
+filtering graph edges by this score would no longer implement the standard
+directional count/network rule. Directional reports still include diagnostic
+confidence values when `--emit-explain` is enabled.
+
 ### `--no-quality-aware`
 
-Disable quality-aware seed ranking and quality contribution to merge
-confidence.
+Disable quality-aware ratio-mode seed ranking and quality contribution to merge
+confidence. Directional graph membership is quality-independent with or without
+this option.
 
 Use this when UMI quality tags are absent, unreliable, or not comparable across
 inputs.
@@ -354,11 +384,13 @@ Write correction explanations:
 
 This is the most useful report for parameter tuning. It shows raw UMI,
 corrected UMI, counts, Hamming distance, quality summaries, confidence, reason,
-and bucket.
+bucket, method, immediate parent, edge distance, and graph path length.
 
-The correction report uses `seed_count` and `seed_avgq` for the target UMI
-before lower-support UMIs are merged into it. Final molecule read counts are in
-`<out>.molecules.tsv`.
+The correction report uses `corr_umi`, `seed_count`, and `seed_avgq` for the
+final component root before lower-support UMIs are merged into it.
+`parent_umi`, `parent_count`, and `edge_hamming` describe the immediate edge;
+`path_length` distinguishes self, direct, and transitive assignments. Final
+molecule read counts are in `<out>.molecules.tsv`.
 
 ### `--no-bam-dup-flag`
 
@@ -382,6 +414,18 @@ src/isoumi \
   --ham 1 \
   --ratio 0.05 \
   --min-merge-confidence 0.60 \
+  --emit-explain
+```
+
+### Directional correction
+
+```bash
+src/isoumi \
+  --bam input.bam \
+  --out directional \
+  --correction-method directional \
+  --ham 1 \
+  --emit-tsv \
   --emit-explain
 ```
 

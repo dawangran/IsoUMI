@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Adds optional UMI-tools-style directional UMI correction with the `2n-1` count rule and transitive graph grouping.
+- Extends correction reports with method, immediate-parent, edge-distance, and path-length audit fields.
+- Preserves direct count-ratio correction as the backward-compatible default.
+
 ## IsoUMI 0.1.0 - 2026-06-05
 
 Initial publication-oriented release.

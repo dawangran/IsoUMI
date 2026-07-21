@@ -24,8 +24,8 @@ Given one or more BAM files, IsoUMI:
    - splice-junction or locus structure, unless `--no-structure` is used
    - optional transcript-end bins via `--end-bin`
 3. Counts UMIs inside each group.
-4. Collapses low-support UMIs directly into higher-support seed UMIs when they are close in sequence and satisfy count-ratio rules.
-5. Optionally incorporates UMI quality information when ranking merges and computing merge confidence.
+4. Corrects low-support UMIs with either direct count-ratio assignment or UMI-tools-style directional networks.
+5. Optionally incorporates UMI quality information when ranking ratio-mode merges and computing diagnostic confidence.
 6. Writes corrected UMI tags back to BAM and optionally emits molecule, assignment, and correction-explanation tables.
 
 ## Key Features
@@ -35,6 +35,7 @@ Given one or more BAM files, IsoUMI:
 - Cell-bucket sharding for scalable parallel processing
 - Quality-aware UMI scoring using `--umi-qual-tag`
 - Optional merge-confidence filtering with `--min-merge-confidence`
+- Optional directional UMI networks using the UMI-tools `2n-1` count rule
 - Optional explainability output with `--emit-explain`
 - Optional transcript-end-aware grouping with `--end-bin`
 - Baseline no-structure grouping for application-note comparisons via `--no-structure`
@@ -182,20 +183,30 @@ IsoUMI defines a candidate molecule using a grouping key of the form:
 
 When `--no-structure` is used, the key intentionally omits splice-junction, locus, and transcript-end terms. This mode is intended as an internal baseline for evaluating the value of isoform-aware grouping.
 
-Inside each group:
+Inside each group, unique UMIs are counted and corrected using the method selected
+by `--correction-method`.
 
-1. Unique UMIs are counted.
-2. Candidate seed/raw UMI pairs are compared.
-3. A lower-count raw UMI can merge into a higher-count seed UMI if:
-   - Hamming distance is within `--ham`
-   - `smaller / larger <= --ratio`
-   - optional confidence threshold is satisfied
-4. Candidate seed UMIs are processed from strongest to weakest.
-5. A raw UMI is corrected only to a seed UMI that directly satisfies the distance, count-ratio, and confidence filters.
-6. Seed priority is:
-   - higher count wins
-   - if counts tie and quality-aware mode is enabled, higher mean UMI quality wins
-   - if still tied, lexicographically smaller UMI wins
+With the default `ratio` method:
+
+1. Candidate seed UMIs are processed from strongest to weakest.
+2. A lower-count raw UMI merges only when the raw-to-seed pair directly satisfies
+   `--ham`, `smaller / larger <= --ratio`, and the optional confidence floor.
+3. Seed priority is count, optional mean UMI quality, then lexicographic order.
+4. Chain-based corrections that exceed the direct raw-to-seed Hamming threshold
+   are not allowed.
+
+With the `directional` method:
+
+1. A directed edge `A -> B` is added when the UMIs are within `--ham` and
+   `count(A) >= 2 * count(B) - 1`.
+2. Seeds are visited by descending count and then lexicographic UMI order.
+3. All UMIs reachable through outgoing edges are assigned to the same seed, so
+   a final raw-to-seed distance may exceed `--ham` through a valid chain.
+4. UMI quality, `--ratio`, and merge confidence do not change graph membership.
+
+This reproduces the UMI-tools directional count/network rule inside IsoUMI's
+isoform-aware grouping keys; it is not identical to running standalone UMI-tools
+because the upstream grouping context differs.
 
 ## Input Expectations
 
@@ -276,9 +287,10 @@ recommendations, and interactions, see [`docs/parameters.md`](./docs/parameters.
 
 ### UMI correction
 
+- `--correction-method <ratio|directional>`: correction algorithm, default `ratio`
 - `--ham <INT>`: maximum Hamming distance, default `1`
-- `--ratio <FLOAT>`: require `smaller / larger <= ratio`, range `0..1`, default `0.10`
-- `--min-merge-confidence <FLOAT>`: optional confidence floor, default `0.00`
+- `--ratio <FLOAT>`: ratio-mode requirement `smaller / larger <= ratio`, range `0..1`, default `0.10`; ignored by directional mode
+- `--min-merge-confidence <FLOAT>`: optional ratio-mode confidence floor, default `0.00`; positive values are incompatible with directional mode
 - `--no-quality-aware`: disable quality-aware ranking and quality contribution to confidence
 
 ### Grouping
@@ -342,16 +354,31 @@ Columns:
 - `confidence`
 - `reason`
 - `bucket`
+- `method`
+- `parent_umi`
+- `parent_count`
+- `edge_hamming`
+- `path_length`
 
 `reason` is currently one of:
 
 - `self`: no correction was needed
 - `count+distance`: correction supported by count and sequence distance
 - `count+quality`: correction additionally supported by quality information
+- `directional`: correction through a directional graph edge or path
 
-`seed_count` and `seed_avgq` describe the target seed UMI before lower-support UMIs are merged into it. The final corrected molecule read count is reported in `*.molecules.tsv`.
+`corr_umi`, `seed_count`, and `seed_avgq` describe the final component root before
+lower-support UMIs are merged into it. `parent_umi`, `parent_count`, and
+`edge_hamming` describe the immediate graph edge used to reach a directional
+assignment. `path_length` is zero for a root, one for a direct correction, and
+greater than one for a transitive directional correction. Consequently,
+`hamming` (raw UMI to final root) can exceed `--ham` in directional mode. The
+final corrected molecule read count is reported in `*.molecules.tsv`.
 
-For `self` rows, `confidence` is reported as `1.0`. For actual UMI corrections, `confidence` is a heuristic merge score derived from count ratio, Hamming distance, and optional UMI quality; it is not a posterior probability.
+For `self` rows, `confidence` is reported as `1.0`. For actual UMI corrections,
+`confidence` is a heuristic edge score derived from count ratio, Hamming distance,
+and optional UMI quality; it is not a posterior probability. Directional mode
+reports this value for auditing but never uses it to accept or reject an edge.
 
 ## Practical Tips
 
@@ -360,6 +387,7 @@ For `self` rows, `confidence` is reported as `1.0`. For actual UMI corrections, 
 - Use `--no-gene` only if gene tags are absent or unreliable.
 - Use `--end-bin` when you want molecule grouping to better respect transcript ends.
 - Use `--emit-explain` when benchmarking or tuning parameters.
+- Use `--correction-method directional` to evaluate UMI-tools-style correction within IsoUMI transcript contexts, especially for sparse UMI counts.
 - Raise `--buckets` for larger datasets to spread memory across more buckets.
 - Tighten `--min-merge-confidence` if you want more conservative UMI correction.
 
@@ -427,6 +455,18 @@ src/isoumi \
   --emit-explain
 ```
 
+### Directional UMI correction
+
+```bash
+src/isoumi \
+  --bam input.bam \
+  --out directional \
+  --correction-method directional \
+  --ham 1 \
+  --emit-tsv \
+  --emit-explain
+```
+
 ### Tag remapping
 
 ```bash
@@ -445,6 +485,7 @@ src/isoumi \
 
 - UMI distance is still sequence-based and currently uses Hamming distance only.
 - UMI quality is used for seed ranking and confidence scoring, not a full probabilistic error model.
+- Directional graph construction compares UMI pairs within each grouping key and can be expensive for groups with very many unique UMIs.
 - Final BAM linking depends on your local `htslib` setup; some static `htslib` builds may require extra libraries through `HTS_EXTRA_LIBS` or `CRYPTO_LIBS`.
 - Output BAM is not coordinate-sorted by construction.
 

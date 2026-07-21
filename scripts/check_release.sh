@@ -11,6 +11,9 @@ grep -q "version: \"$version\"" CITATION.cff
 grep -q "## $expected_name $version" CHANGELOG.md
 grep -q "BIN = isoumi" src/Makefile
 grep -q "src/isoumi" .gitignore
+grep -q -- '--correction-method' README.md
+grep -Fq 'seed_count >= 2 * raw_count - 1' docs/parameters.md
+grep -q 'parent_umi' README.md
 
 if [ -x src/isoumi ]; then
   actual=$(src/isoumi --version 2>&1)
