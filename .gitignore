@@ -8,5 +8,6 @@ benchmarks/output/
 *.sam
 *.tsv
 .DS_Store
+.worktrees/
 !examples/*.sam
 !examples/*.tsv
