@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -310,7 +311,10 @@ typedef struct {
 } umi_stat_t;
 typedef struct {
   int rep_idx;
+  int parent_idx;
   int hamming;
+  int edge_hamming;
+  int path_length;
   double corr_mismatch_q;
   double raw_mismatch_q;
   double confidence;
@@ -325,13 +329,18 @@ static int cmp_umi_stat_desc(const void* a, const void* b){
 typedef struct {
   char* raw_umi;
   char* corr_umi;
+  char* parent_umi;
   int raw_count;
   int seed_count;
+  int parent_count;
   int hamming;
+  int edge_hamming;
+  int path_length;
   double raw_avgq;
   double seed_avgq;
   double confidence;
   int quality_supported;
+  correction_method_t method;
 } map_item_t;
 static int cmp_map_item(const void* a, const void* b){ const map_item_t* x=(const map_item_t*)a; const map_item_t* y=(const map_item_t*)b; int c=strcmp(x->raw_umi, y->raw_umi); if(c) return c; return strcmp(x->corr_umi, y->corr_umi); }
 typedef struct { char* key; map_item_t* items; int n; } key_map_t;
@@ -345,7 +354,7 @@ static void free_umi_stats(umi_stat_t* stats, int n){
   }
   free(stats);
 }
-static void free_map_items(map_item_t* items, int n){ for (int i=0;i<n;++i){ free(items[i].raw_umi); free(items[i].corr_umi); } free(items); }
+static void free_map_items(map_item_t* items, int n){ for (int i=0;i<n;++i){ free(items[i].raw_umi); free(items[i].corr_umi); free(items[i].parent_umi); } free(items); }
 static void free_key_maps(key_map_t* km, int km_n){
   if (!km) return;
   for (int t=0;t<km_n;++t){
@@ -503,18 +512,24 @@ static int choose_next_seed(const cli_opts_t* o, const umi_stat_t* stats, int n,
   return best;
 }
 
-static int build_seed_assignments(const cli_opts_t* o, const umi_stat_t* stats, int n,
-                                  umi_assignment_t** out){
+static int build_ratio_assignments(const cli_opts_t* o, const umi_stat_t* stats, int n,
+                                   umi_assignment_t** out){
   umi_assignment_t* assignments = (umi_assignment_t*)calloc((size_t)n, sizeof(umi_assignment_t));
   if (!assignments) return -1;
-  for (int i=0; i<n; ++i) assignments[i].rep_idx = -1;
+  for (int i=0; i<n; ++i){
+    assignments[i].rep_idx = -1;
+    assignments[i].parent_idx = -1;
+  }
 
   for (;;) {
     int seed = choose_next_seed(o, stats, n, assignments);
     if (seed < 0) break;
 
     assignments[seed].rep_idx = seed;
+    assignments[seed].parent_idx = seed;
     assignments[seed].hamming = 0;
+    assignments[seed].edge_hamming = 0;
+    assignments[seed].path_length = 0;
     assignments[seed].corr_mismatch_q = -1.0;
     assignments[seed].raw_mismatch_q = -1.0;
     assignments[seed].confidence = 1.0;
@@ -525,6 +540,9 @@ static int build_seed_assignments(const cli_opts_t* o, const umi_stat_t* stats, 
       if (assignments[idx].rep_idx >= 0 || idx == seed) continue;
       if (can_assign_to_seed(o, &stats[seed], &stats[idx], &candidate)){
         candidate.rep_idx = seed;
+        candidate.parent_idx = seed;
+        candidate.edge_hamming = candidate.hamming;
+        candidate.path_length = 1;
         assignments[idx] = candidate;
       }
     }
@@ -534,19 +552,169 @@ static int build_seed_assignments(const cli_opts_t* o, const umi_stat_t* stats, 
   return 0;
 }
 
+typedef struct {
+  int* data;
+  int n;
+  int cap;
+} int_vec_t;
+
+static int int_vec_push(int_vec_t* v, int value){
+  if (v->n == v->cap){
+    int new_cap = v->cap ? v->cap * 2 : 4;
+    int* new_data = (int*)realloc(v->data, sizeof(int) * (size_t)new_cap);
+    if (!new_data) return -1;
+    v->data = new_data;
+    v->cap = new_cap;
+  }
+  v->data[v->n++] = value;
+  return 0;
+}
+
+static void free_directional_graph(int_vec_t* graph, int n){
+  if (!graph) return;
+  for (int i=0; i<n; ++i) free(graph[i].data);
+  free(graph);
+}
+
+static int directional_count_allows(const umi_stat_t* from, const umi_stat_t* to){
+  return (int64_t)from->count >= (int64_t)2 * (int64_t)to->count - 1;
+}
+
+static int build_directional_graph(const cli_opts_t* o, const umi_stat_t* stats, int n,
+                                   int_vec_t** out){
+  int_vec_t* graph = (int_vec_t*)calloc((size_t)n, sizeof(int_vec_t));
+  if (!graph) return -1;
+
+  for (int i=0; i<n; ++i){
+    for (int j=i+1; j<n; ++j){
+      int ham = 0, mismatch_q_n = 0;
+      double i_mq = -1.0, j_mq = -1.0;
+      if (compute_umi_distance_metrics(&stats[i], &stats[j], o->ham,
+                                       &ham, &i_mq, &j_mq, &mismatch_q_n) != 0){
+        continue;
+      }
+      if (directional_count_allows(&stats[i], &stats[j]) &&
+          int_vec_push(&graph[i], j) != 0){
+        free_directional_graph(graph, n);
+        return -1;
+      }
+      if (directional_count_allows(&stats[j], &stats[i]) &&
+          int_vec_push(&graph[j], i) != 0){
+        free_directional_graph(graph, n);
+        return -1;
+      }
+    }
+  }
+
+  *out = graph;
+  return 0;
+}
+
+static int build_directional_assignments(const cli_opts_t* o, const umi_stat_t* stats, int n,
+                                         umi_assignment_t** out){
+  int_vec_t* graph = NULL;
+  int* queue = NULL;
+  umi_assignment_t* assignments = NULL;
+
+  if (build_directional_graph(o, stats, n, &graph) != 0) return -1;
+  assignments = (umi_assignment_t*)calloc((size_t)n, sizeof(umi_assignment_t));
+  queue = (int*)malloc(sizeof(int) * (size_t)n);
+  if (!assignments || !queue){
+    free(assignments);
+    free(queue);
+    free_directional_graph(graph, n);
+    return -1;
+  }
+  for (int i=0; i<n; ++i){
+    assignments[i].rep_idx = -1;
+    assignments[i].parent_idx = -1;
+  }
+
+  for (int seed=0; seed<n; ++seed){
+    int head = 0, tail = 0;
+    if (assignments[seed].rep_idx >= 0) continue;
+
+    assignments[seed].rep_idx = seed;
+    assignments[seed].parent_idx = seed;
+    assignments[seed].hamming = 0;
+    assignments[seed].edge_hamming = 0;
+    assignments[seed].path_length = 0;
+    assignments[seed].corr_mismatch_q = -1.0;
+    assignments[seed].raw_mismatch_q = -1.0;
+    assignments[seed].confidence = 1.0;
+    assignments[seed].mismatch_q_n = 0;
+    queue[tail++] = seed;
+
+    while (head < tail){
+      int parent = queue[head++];
+      for (int k=0; k<graph[parent].n; ++k){
+        int child = graph[parent].data[k];
+        int edge_ham = 0, edge_q_n = 0;
+        int root_ham = 0, root_q_n = 0;
+        double parent_mq = -1.0, child_mq = -1.0;
+        double root_mq = -1.0, root_child_mq = -1.0;
+        if (assignments[child].rep_idx >= 0) continue;
+        if (compute_umi_distance_metrics(&stats[parent], &stats[child], o->ham,
+                                         &edge_ham, &parent_mq, &child_mq,
+                                         &edge_q_n) != 0 ||
+            compute_umi_distance_metrics(&stats[seed], &stats[child], -1,
+                                         &root_ham, &root_mq, &root_child_mq,
+                                         &root_q_n) != 0){
+          free(assignments);
+          free(queue);
+          free_directional_graph(graph, n);
+          return -1;
+        }
+        assignments[child].rep_idx = seed;
+        assignments[child].parent_idx = parent;
+        assignments[child].hamming = root_ham;
+        assignments[child].edge_hamming = edge_ham;
+        assignments[child].path_length = assignments[parent].path_length + 1;
+        assignments[child].corr_mismatch_q = parent_mq;
+        assignments[child].raw_mismatch_q = child_mq;
+        assignments[child].confidence = compute_merge_confidence(
+            o, &stats[parent], &stats[child], edge_ham,
+            parent_mq, child_mq, edge_q_n);
+        assignments[child].mismatch_q_n = edge_q_n;
+        queue[tail++] = child;
+      }
+    }
+  }
+
+  free(queue);
+  free_directional_graph(graph, n);
+  *out = assignments;
+  return 0;
+}
+
+static int build_umi_assignments(const cli_opts_t* o, const umi_stat_t* stats, int n,
+                                 umi_assignment_t** out){
+  if (o->correction_method == CORRECTION_DIRECTIONAL){
+    return build_directional_assignments(o, stats, n, out);
+  }
+  return build_ratio_assignments(o, stats, n, out);
+}
+
+static const char* correction_method_name(correction_method_t method){
+  return method == CORRECTION_DIRECTIONAL ? "directional" : "ratio";
+}
+
 static const char* merge_reason(const map_item_t* item){
   if (!item) return "unknown";
   if (item->hamming == 0 || strcmp(item->raw_umi, item->corr_umi) == 0) return "self";
+  if (item->method == CORRECTION_DIRECTIONAL) return "directional";
   if (item->quality_supported) return "count+quality";
   return "count+distance";
 }
 
 static int emit_correction_row(FILE* fp, const char* key, const map_item_t* item, int bucket){
   if (!fp || !item) return 0;
-  if (fprintf(fp, "%s\t%s\t%s\t%d\t%d\t%d\t%.2f\t%.2f\t%.4f\t%s\t%d\n",
+  if (fprintf(fp, "%s\t%s\t%s\t%d\t%d\t%d\t%.2f\t%.2f\t%.4f\t%s\t%d\t%s\t%s\t%d\t%d\t%d\n",
               key, item->raw_umi, item->corr_umi, item->raw_count, item->seed_count,
               item->hamming, item->raw_avgq, item->seed_avgq, item->confidence,
-              merge_reason(item), bucket) < 0){
+              merge_reason(item), bucket, correction_method_name(item->method),
+              item->parent_umi, item->parent_count, item->edge_hamming,
+              item->path_length) < 0){
     return -1;
   }
   return 0;
@@ -611,7 +779,7 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam, FIL
     }
     qsort(uc, uc_n, sizeof(umi_stat_t), cmp_umi_stat_desc);
     umi_assignment_t* assignments = NULL;
-    if (build_seed_assignments(o, uc, uc_n, &assignments) != 0){
+    if (build_umi_assignments(o, uc, uc_n, &assignments) != 0){
       free_umi_stats(uc, uc_n);
       free_pairs(arr,n);
       free_key_maps(km, km_n);
@@ -621,20 +789,25 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam, FIL
     if(!items){ free(assignments); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1; }
     for (int idx=0; idx<uc_n; ++idx){
       int ridx=assignments[idx].rep_idx;
+      int pidx=assignments[idx].parent_idx;
       items[mi_n].raw_umi=sdup(uc[idx].umi);
       items[mi_n].corr_umi=sdup(uc[ridx].umi);
-      if (!items[mi_n].raw_umi || !items[mi_n].corr_umi){
-        free(items[mi_n].raw_umi);
-        free(items[mi_n].corr_umi);
-        free_map_items(items, mi_n);
+      items[mi_n].parent_umi=sdup(uc[pidx].umi);
+      if (!items[mi_n].raw_umi || !items[mi_n].corr_umi || !items[mi_n].parent_umi){
+        free_map_items(items, mi_n + 1);
         free(assignments); free_umi_stats(uc, uc_n); free_pairs(arr,n); free_key_maps(km, km_n); return -1;
       }
       items[mi_n].raw_count = uc[idx].count;
       items[mi_n].seed_count = uc[ridx].count;
+      items[mi_n].parent_count = uc[pidx].count;
       items[mi_n].raw_avgq = uc[idx].mean_qual;
       items[mi_n].seed_avgq = uc[ridx].mean_qual;
       items[mi_n].hamming = assignments[idx].hamming;
-      items[mi_n].quality_supported = o->quality_aware &&
+      items[mi_n].edge_hamming = assignments[idx].edge_hamming;
+      items[mi_n].path_length = assignments[idx].path_length;
+      items[mi_n].method = o->correction_method;
+      items[mi_n].quality_supported = o->correction_method == CORRECTION_RATIO &&
+        o->quality_aware &&
         assignments[idx].mismatch_q_n > 0 &&
         assignments[idx].corr_mismatch_q >= 0.0 &&
         assignments[idx].raw_mismatch_q >= 0.0 &&
@@ -868,7 +1041,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         status |= 1;
         continue;
       }
-      fprintf(f_corr, "key\traw_umi\tcorr_umi\traw_count\tseed_count\thamming\traw_avgq\tseed_avgq\tconfidence\treason\tbucket\n");
+      fprintf(f_corr, "key\traw_umi\tcorr_umi\traw_count\tseed_count\thamming\traw_avgq\tseed_avgq\tconfidence\treason\tbucket\tmethod\tparent_umi\tparent_count\tedge_hamming\tpath_length\n");
     }
     if (build_bucket_mapping(o, ib, f_corr, i, &km, &km_n)!=0){
       if (f_corr){ fclose(f_corr); remove(corrf); }
