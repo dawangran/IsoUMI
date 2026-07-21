@@ -71,6 +71,19 @@ static int parse_double_opt(const char *name, const char *value, double min_valu
   return 0;
 }
 
+static int parse_correction_method(const char *value, correction_method_t *out){
+  if (strcmp(value, "ratio") == 0){
+    *out = CORRECTION_RATIO;
+    return 0;
+  }
+  if (strcmp(value, "directional") == 0){
+    *out = CORRECTION_DIRECTIONAL;
+    return 0;
+  }
+  fprintf(stderr, "unknown --correction-method: %s\n", value);
+  return -1;
+}
+
 static int push_bam_path(cli_opts_t *o, const char *path){
   if (strvec_push(&o->bam_list, path) != 0){
     fprintf(stderr, "out of memory while recording BAM input\n");
@@ -120,6 +133,8 @@ static void usage(void){
 "  --mol-tag <TAG>        Optional; write molecule id (CB|key|UMIcorr)\n"
 "\n"
 "CORRECTION SETTINGS:\n"
+"  --correction-method <ratio|directional>\n"
+"                         UMI correction algorithm (default: ratio)\n"
 "  --ham <INT>            Max Hamming distance (default: 1)\n"
 "  --ratio <FLOAT>        Collapse if smaller/larger <= ratio, range 0..1 (default: 0.10)\n"
 "  --min-merge-confidence <FLOAT>\n"
@@ -162,6 +177,7 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
   o->input_scope_tag = xstrdup("zi");
   o->no_gene = 0;
   o->no_structure = 0;
+  o->correction_method = CORRECTION_RATIO;
   o->ham = 1;
   o->ratio = 0.1;
   o->min_merge_confidence = 0.0;
@@ -212,6 +228,7 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
     {"isolate-inputs", no_argument, 0, 26},
     {"input-scope-tag", required_argument, 0, 27},
     {"no-bam-dup-flag", no_argument, 0, 28},
+    {"correction-method", required_argument, 0, 29},
     {0,0,0,0}
   };
 
@@ -309,10 +326,19 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
         if (set_tag_opt(&o->input_scope_tag, "--input-scope-tag", optarg) != 0) return -1;
         break;
       case 28: o->set_bam_dup_flag=0; break;
+      case 29:
+        if (parse_correction_method(optarg, &o->correction_method) != 0) return -1;
+        break;
       default: usage(); return -1;
     }
   }
 
+  if (o->correction_method == CORRECTION_DIRECTIONAL &&
+      o->min_merge_confidence > 0.0){
+    fprintf(stderr,
+            "--min-merge-confidence is incompatible with --correction-method directional\n");
+    return -1;
+  }
   if (!o->out_prefix){ fprintf(stderr,"--out is required\n"); usage(); return -1; }
   if (o->bam_list.n==0){ fprintf(stderr,"no BAM inputs (use --bam or --bam-list)\n"); usage(); return -1; }
   if (!o->tmp_dir){

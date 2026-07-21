@@ -1,4 +1,5 @@
 *.o
+*.d
 src/isoumi
 tmp_buckets/
 examples/output/

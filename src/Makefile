@@ -51,12 +51,13 @@ INC := $(HTS_CFLAGS)
 LIBS := $(HTS_LDFLAGS)
 
 OBJS = main.o cli.o io.o sj.o key.o umi.o vector.o key_build.o pipeline.o
+DEPFILES = $(OBJS:.o=.d)
 BIN = isoumi
 
 all: $(BIN)
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(INC) $(EXTRA_CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(INC) $(EXTRA_CFLAGS) -MMD -MP -c $< -o $@
 
 $(BIN): $(OBJS)
 	$(CC) $(CFLAGS) $(INC) -o $@ $(OBJS) $(LDFLAGS) $(LIBS) $(EXTRA_LDFLAGS)
@@ -67,6 +68,9 @@ test: $(BIN)
 	sh ../tests/smoke.sh ./$(BIN)
 	sh ../tests/synthetic_truth.sh ./$(BIN)
 	sh ../tests/bam_tags.sh ./$(BIN)
+	sh ../tests/directional.sh ./$(BIN)
 
 clean:
-	rm -f $(OBJS) $(BIN)
+	rm -f $(OBJS) $(DEPFILES) $(BIN)
+
+-include $(DEPFILES)
