@@ -17,8 +17,25 @@ before molecule correction:
 src/isoumi --bam sample1.bam --bam sample2.bam --out merged
 ```
 
-For multiple inputs, reference dictionaries must match exactly. Compatible
-metadata lines are merged; conflicting `@RG` or `@PG` IDs are rejected.
+For multiple inputs, reference dictionaries must match by target name, order,
+and length. The first available `M5` and `AS` values are preserved, and
+conflicting values in any later input are rejected. Compatible metadata lines
+are merged, while conflicting `@RG` IDs are rejected because they can change
+sample/library semantics.
+
+Program provenance is preserved by namespacing every `@PG` ID from inputs after
+the first. IsoUMI rewrites `@PG ID`, `@PG PP`, and record-level `PG:Z:` values as
+one mapping. For example, `minimap2` in the second input becomes
+`minimap2.isoumi.input000001`. The output header also records the IsoUMI version
+and invocation in a unique `@PG` entry. Every `PP` value must resolve to a
+program ID declared in the same input header.
+
+Use `--strip-pg` when program provenance is intentionally excluded to reduce
+output size. In this mode IsoUMI removes every input `@PG` line, removes every
+record-level `PG` auxiliary tag before bucket files are written, and does not
+add its own `@PG` line. Other metadata, including `@RG`, `@SQ`, and `@CO`, is
+unchanged. Removing the header and record tags together prevents dangling
+`PG:Z:` references.
 
 By default, repeated inputs are deduplicated together. This is appropriate for
 technical splits or lanes from the same cell-barcode namespace. For independent
@@ -49,9 +66,30 @@ Optional reports use the same prefix:
 <PREFIX>.corrections.tsv
 ```
 
+Final files are written through same-directory staging paths and atomically
+renamed after a successful close. No final output may be the same path or inode
+as an input BAM.
+
+
+### `--strip-pg`
+
+Remove all program-provenance metadata from temporary and final BAM files:
+
+- all header `@PG` lines are omitted
+- all record-level `PG` tags are deleted
+- IsoUMI does not add its own version/command-line `@PG` line
+
+This option does not change grouping, UMI correction, molecule selection,
+duplicate marking, report contents, or other header records. Use it only when
+the original command history is stored elsewhere and reduced BAM size is more
+important than embedded provenance.
+
 ## Tag Parameters
 
-All tag-name parameters must be two-character SAM tags.
+All tag-name parameters must match `[A-Za-z][A-Za-z0-9]`. Tags assigned to
+different semantic roles must be distinct. Invalid or conflicting tag
+configurations fail before any output is created. `PG` is reserved for SAM
+program provenance and cannot be selected by a tag-name option.
 
 ### `--cell-tag <TAG>` default `CB`
 
@@ -63,7 +101,8 @@ Changing this is necessary for non-10x or custom preprocessing pipelines.
 ### `--umi-tag <TAG>` default `UR`
 
 Raw UMI tag read from each input record. Reads without this tag are passed
-through with duplicate flag `0`.
+through with duplicate flag `0`. Any pre-existing value in the configured
+corrected-UMI or molecule-ID output tag is removed from those records.
 
 UMI correction compares strings with Hamming distance, so UMIs must have equal
 length to be compared.
@@ -120,6 +159,17 @@ query length, and then stable input order.
 IsoUMI also sets or clears the standard SAM duplicate bit (`0x400`) by default
 so downstream BAM tools can recognize duplicates without reading `DA`.
 
+Only primary alignments contribute to UMI counts and molecule representative
+selection. Secondary (`0x100`) and supplementary (`0x800`) records inherit the
+corrected UMI, duplicate status, and optional molecule tag from an unambiguous
+matching primary record with the same QNAME, input scope, and read-end flag.
+They are excluded from molecule and assignment TSV counts. An orphan
+non-primary record passes through with `UB=UR` and duplicate status `0`.
+
+Mapped secondary and supplementary records must carry the same cell tag as the
+primary record. A mapped non-primary record without that tag is rejected because
+it cannot be routed to the primary record's bucket safely.
+
 ### `--mol-tag <TAG>`
 
 Optional output tag containing a molecule identifier:
@@ -130,6 +180,10 @@ CB|grouping_key|corrected_UMI
 
 This is useful when inspecting BAM records directly. The same identifier appears
 in `*.assignments.tsv` when `--emit-tsv` is enabled.
+
+Dynamic values percent-escape `%`, `|`, and `=`; a literal `NA` value is
+also escaped so it cannot collide with the missing-value marker used in grouping
+keys.
 
 ## Grouping Parameters
 
@@ -333,7 +387,8 @@ inputs.
 ### `--threads <INT>` default `4`
 
 Number of worker threads for per-bucket processing. Threading happens across
-cell-barcode buckets.
+cell-barcode buckets; the same setting is also used for parallel input-BAM
+decoding during sharding and parallel compression of the final BAM.
 
 If IsoUMI is built without OpenMP support, this option is accepted but
 per-bucket processing runs serially. The program prints a runtime notice in
@@ -344,21 +399,50 @@ that case.
 Number of cell-barcode buckets. Increasing this can lower peak memory per bucket
 on large datasets, but creates more temporary files.
 
+Within each bucket, IsoUMI stream-aggregates repeated grouping-key/UMI pairs and
+hash-deduplicates mapped non-primary read identities. Peak statistical working
+memory therefore follows the number of unique pairs and unique non-primary
+identities in simultaneously active buckets, not the raw record count. A single
+extremely high-complexity cell can still dominate one bucket.
+
 Typical choices:
 
 - `16` or `32`: small datasets
 - `64`: default
 - `128` or `256`: larger datasets or high-depth cells
 
+For hundred-GB-scale BAMs, a practical starting point is 16 CPU threads, 64 GB
+RAM, and 128-256 buckets. IsoUMI does not use a GPU. Increase RAM or bucket count
+after measuring a representative sample because unique molecule complexity and
+cell imbalance, rather than compressed BAM size alone, determine peak memory.
+
 ### `--tmp-dir <DIR>` default `<out>.isoumi.tmp.<pid>`
 
 Directory for bucket BAMs and temporary per-bucket reports. The directory must
 not already exist; this prevents accidental reuse of stale bucket files.
 
+Intermediate BAMs use fast level-1 compression because they are read only by
+later pipeline phases and recompressed into the final BAM. For hundred-GB-scale
+inputs, use a local SSD/NVMe filesystem with enough free space; a network
+filesystem can make sharding and concatenation I/O-bound.
+
+By default, temporary BAMs are reclaimed incrementally. A source bucket is
+removed only after its deduplicated replacement closes successfully. During
+final concatenation, each deduplicated bucket and TSV fragment is reclaimed
+after it has been copied successfully into a staging output. The final BAM and
+reports are atomically renamed into place only after a successful close, so an
+existing output cannot be left partially overwritten. Consequently, normal peak
+scratch usage is approximately one intermediate BAM generation plus the growing
+staged final output, report data, and in-flight bucket overhead. Compression
+ratios and uneven bucket sizes still matter. The output directory also needs
+space for the staging file even when `--tmp-dir` is on another filesystem.
+
 ### `--keep-tmp`
 
 Keep temporary bucket files after the run. Use this for debugging bucket-level
-failures or inspecting intermediate BAMs.
+failures or inspecting intermediate BAMs. It disables incremental BAM deletion,
+so both source and deduplicated bucket generations remain on disk and require
+substantially more temporary space.
 
 ## Report Parameters
 

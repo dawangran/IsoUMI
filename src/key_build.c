@@ -1,12 +1,47 @@
 #include "key_build.h"
 #include "sj.h"
 #include "key.h"
+#include <inttypes.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
 static char strand_char(bam1_t* b){ return (b->core.flag & BAM_FREVERSE) ? '-' : '+'; }
-static int bin_coord(int x, int bin){ return bin > 0 ? (x / bin) * bin : x; }
+static hts_pos_t bin_coord(hts_pos_t x, int bin){ return bin > 0 ? (x / bin) * bin : x; }
+
+char* escape_key_component(const char* value){
+  static const char hex[] = "0123456789ABCDEF";
+  size_t need = 0;
+  char* out;
+  char* dst;
+  if (!value) return NULL;
+  for (const unsigned char* p=(const unsigned char*)value; *p; ++p){
+    size_t add = (*p == '%' || *p == '|' || *p == '=') ? 3u : 1u;
+    if (need > SIZE_MAX - add) return NULL;
+    need += add;
+  }
+  /* Keep the reserved missing-value marker distinct from a literal tag value. */
+  if (strcmp(value, "NA") == 0) need = 6;
+  out = (char*)malloc(need + 1);
+  if (!out) return NULL;
+  dst = out;
+  if (strcmp(value, "NA") == 0){
+    memcpy(dst, "%4E%41", 6);
+    dst += 6;
+  } else {
+    for (const unsigned char* p=(const unsigned char*)value; *p; ++p){
+      if (*p == '%' || *p == '|' || *p == '='){
+        *dst++ = '%';
+        *dst++ = hex[*p >> 4];
+        *dst++ = hex[*p & 15];
+      } else {
+        *dst++ = (char)*p;
+      }
+    }
+  }
+  *dst = '\0';
+  return out;
+}
 
 char* build_group_key(bam1_t* b, const char* cell_tag, const char* gene_tag,
                       const char* source_tag, const char* input_scope_tag,
@@ -17,24 +52,34 @@ char* build_group_key(bam1_t* b, const char* cell_tag, const char* gene_tag,
   const char* input_scope = input_scope_tag ? get_tag_Z(b, input_scope_tag) : NULL;
   int tid = b ? b->core.tid : -1;
   int is_spliced=0; uint64_t sjh=0, lxh=0; build_sj_or_locus(b, locus_bin, sj_jitter, &is_spliced, &sjh, &lxh);
-  const char* gxv = (!no_gene && gx) ? gx : "NA";
-  const char* cbv = cb?cb:"NA";
+  char* cb_escaped = cb ? escape_key_component(cb) : NULL;
+  char* gx_escaped = (!no_gene && gx) ? escape_key_component(gx) : NULL;
+  char* src_escaped = (source_tag && src) ? escape_key_component(src) : NULL;
+  char* input_escaped = (input_scope_tag && input_scope) ? escape_key_component(input_scope) : NULL;
+  const char* gxv = (!no_gene && gx) ? gx_escaped : "NA";
+  const char* cbv = cb ? cb_escaped : "NA";
   const char* src_prefix = source_tag ? "|SRC=" : "";
-  const char* srcv = source_tag ? (src ? src : "NA") : "";
+  const char* srcv = source_tag ? (src ? src_escaped : "NA") : "";
   const char* input_prefix = input_scope_tag ? "|IN=" : "";
-  const char* inputv = input_scope_tag ? (input_scope ? input_scope : "NA") : "";
+  const char* inputv = input_scope_tag ? (input_scope ? input_escaped : "NA") : "";
   char strch = strand_char(b);
   const char* key_fmt = no_structure
     ? "CB=%s|GX=%s%s%s%s%s|TID=%d|STR=%c|CTX=NA"
     : end_bin > 0
-    ? "CB=%s|GX=%s%s%s%s%s|TID=%d|STR=%c|%s=%016llx|E5=%d|E3=%d"
+    ? "CB=%s|GX=%s%s%s%s%s|TID=%d|STR=%c|%s=%016llx|E5=%" PRId64 "|E3=%" PRId64
     : "CB=%s|GX=%s%s%s%s%s|TID=%d|STR=%c|%s=%016llx";
-  int32_t pos = b ? b->core.pos : -1;
-  int32_t end_pos = b ? bam_endpos(b) : -1;
-  int tx5 = (b && (b->core.flag & BAM_FREVERSE)) ? end_pos : pos;
-  int tx3 = (b && (b->core.flag & BAM_FREVERSE)) ? pos : end_pos;
-  int e5 = bin_coord(tx5, end_bin);
-  int e3 = bin_coord(tx3, end_bin);
+  hts_pos_t pos = b ? b->core.pos : -1;
+  hts_pos_t end_pos = b ? bam_endpos(b) : -1;
+  hts_pos_t tx5 = (b && (b->core.flag & BAM_FREVERSE)) ? end_pos : pos;
+  hts_pos_t tx3 = (b && (b->core.flag & BAM_FREVERSE)) ? pos : end_pos;
+  hts_pos_t e5 = bin_coord(tx5, end_bin);
+  hts_pos_t e3 = bin_coord(tx3, end_bin);
+  if ((cb && !cb_escaped) || (!no_gene && gx && !gx_escaped) ||
+      (source_tag && src && !src_escaped) ||
+      (input_scope_tag && input_scope && !input_escaped)){
+    free(cb_escaped); free(gx_escaped); free(src_escaped); free(input_escaped);
+    return NULL;
+  }
   int need = no_structure
     ? snprintf(NULL, 0, key_fmt, cbv, gxv, src_prefix, srcv, input_prefix, inputv, tid, strch)
     : end_bin > 0
@@ -44,9 +89,15 @@ char* build_group_key(bam1_t* b, const char* cell_tag, const char* gene_tag,
     : snprintf(NULL, 0, key_fmt, cbv, gxv, src_prefix, srcv, input_prefix, inputv, tid, strch,
                is_spliced ? "SJ" : "LX",
                (unsigned long long)(is_spliced ? sjh : lxh));
-  if (need < 0) return NULL;
+  if (need < 0){
+    free(cb_escaped); free(gx_escaped); free(src_escaped); free(input_escaped);
+    return NULL;
+  }
   char* out = (char*)malloc((size_t)need + 1);
-  if (!out) return NULL;
+  if (!out){
+    free(cb_escaped); free(gx_escaped); free(src_escaped); free(input_escaped);
+    return NULL;
+  }
   if (no_structure){
     snprintf(out, (size_t)need + 1, key_fmt, cbv, gxv, src_prefix, srcv, input_prefix, inputv, tid, strch);
   } else if (end_bin > 0){
@@ -58,5 +109,6 @@ char* build_group_key(bam1_t* b, const char* cell_tag, const char* gene_tag,
              is_spliced ? "SJ" : "LX",
              (unsigned long long)(is_spliced ? sjh : lxh));
   }
+  free(cb_escaped); free(gx_escaped); free(src_escaped); free(input_escaped);
   return out;
 }

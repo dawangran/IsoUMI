@@ -1,0 +1,15 @@
+.git
+.github
+.worktrees
+benchmarks/output
+examples/output
+tmp_buckets
+src/*.o
+src/*.d
+src/isoumi
+*.bam
+*.bai
+*.tsv
+*.log
+__pycache__
+.ipynb_checkpoints

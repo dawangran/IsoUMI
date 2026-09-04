@@ -27,6 +27,7 @@ cleanup() {
   remove_file "$tmpdir/isolated.dedup.bam"
   remove_file "$tmpdir/isolated.molecules.tsv"
   remove_file "$tmpdir/isolated.assignments.tsv"
+  remove_file "$tmpdir/bad.stdout" "$tmpdir/bad.stderr"
   rmdir "$tmpdir" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
@@ -126,3 +127,17 @@ if awk '{ for (i = 12; i <= NF; i++) if ($i ~ /^zi:Z:/) found = 1 } END { exit f
 fi
 grep -q 'IN=input000000' "$tmpdir/isolated.molecules.tsv"
 grep -q 'IN=input000001' "$tmpdir/isolated.molecules.tsv"
+
+if "$bin" --bam "$tmpdir/tags.sam" --out "$tmpdir/bad" \
+    --umi-out XX --dup-flag XX >"$tmpdir/bad.stdout" 2>"$tmpdir/bad.stderr"; then
+  echo "conflicting output tags should fail" >&2
+  exit 1
+fi
+grep -q -- '--umi-out and --dup-flag cannot use the same SAM tag XX' "$tmpdir/bad.stderr"
+
+if "$bin" --bam "$tmpdir/tags.sam" --out "$tmpdir/bad" \
+    --cell-tag 1B >"$tmpdir/bad.stdout" 2>"$tmpdir/bad.stderr"; then
+  echo "invalid SAM tag syntax should fail" >&2
+  exit 1
+fi
+grep -q 'SAM tag pattern' "$tmpdir/bad.stderr"

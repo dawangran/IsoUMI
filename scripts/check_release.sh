@@ -5,7 +5,7 @@ version=$(cat VERSION)
 expected_name="IsoUMI"
 expected_version="$expected_name $version"
 
-grep -q "$expected_version" src/cli.c
+grep -Fq "#define ISOUMI_VERSION_NUMBER \"$version\"" src/cli.h
 grep -q "$expected_version" README.md
 grep -q "version: \"$version\"" CITATION.cff
 grep -q "## $expected_name $version" CHANGELOG.md

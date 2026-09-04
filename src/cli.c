@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,7 @@
 #include <unistd.h>
 #endif
 
-static const char* ISOUMI_VERSION = "IsoUMI 0.1.0";
+static const char* ISOUMI_VERSION = "IsoUMI " ISOUMI_VERSION_NUMBER;
 
 static char* xstrdup(const char* s){
   if(!s) return NULL;
@@ -24,6 +25,31 @@ static char* xstrdup(const char* s){
   if(!p) return NULL;
   memcpy(p,s,n+1);
   return p;
+}
+
+static char* build_command_line(int argc, char** argv){
+  size_t total = 1;
+  char* out;
+  char* dst;
+  for (int i=0; i<argc; ++i){
+    size_t len = strlen(argv[i]);
+    size_t separator = i > 0 ? 1u : 0u;
+    if (total > SIZE_MAX - separator || len > SIZE_MAX - total - separator) return NULL;
+    total += len + separator;
+  }
+  out = (char*)malloc(total);
+  if (!out) return NULL;
+  dst = out;
+  for (int i=0; i<argc; ++i){
+    const unsigned char* src = (const unsigned char*)argv[i];
+    if (i > 0) *dst++ = ' ';
+    while (*src){
+      *dst++ = (*src == '\t' || *src == '\n' || *src == '\r') ? ' ' : (char)*src;
+      src++;
+    }
+  }
+  *dst = '\0';
+  return out;
 }
 
 static int set_string_opt(char **dst, const char *src){
@@ -38,11 +64,49 @@ static int set_string_opt(char **dst, const char *src){
 }
 
 static int set_tag_opt(char **dst, const char *name, const char *tag){
-  if (!tag || strlen(tag) != 2){
-    fprintf(stderr, "%s must be a 2-character SAM tag\n", name);
+  if (!tag || strlen(tag) != 2 ||
+      !isalpha((unsigned char)tag[0]) || !isalnum((unsigned char)tag[1])){
+    fprintf(stderr, "%s must match the SAM tag pattern [A-Za-z][A-Za-z0-9]\n", name);
     return -1;
   }
   return set_string_opt(dst, tag);
+}
+
+typedef struct {
+  const char* option_name;
+  const char* tag;
+} tag_role_t;
+
+static int validate_tag_configuration(const cli_opts_t* o){
+  tag_role_t roles[10];
+  int n = 0;
+  roles[n++] = (tag_role_t){"--cell-tag", o->cell_tag};
+  roles[n++] = (tag_role_t){"--umi-tag", o->umi_tag};
+  roles[n++] = (tag_role_t){"--umi-qual-tag", o->umi_qual_tag};
+  roles[n++] = (tag_role_t){"--gene-tag", o->gene_tag};
+  if (o->source_tag) roles[n++] = (tag_role_t){"--source-tag", o->source_tag};
+  if (o->isolate_inputs) roles[n++] = (tag_role_t){"--input-scope-tag", o->input_scope_tag};
+  roles[n++] = (tag_role_t){"--umi-out", o->umi_out};
+  roles[n++] = (tag_role_t){"--dup-flag", o->dup_flag};
+  if (o->mol_tag) roles[n++] = (tag_role_t){"--mol-tag", o->mol_tag};
+
+  for (int i=0; i<n; ++i){
+    if (strcmp(roles[i].tag, "PG") == 0){
+      fprintf(stderr, "%s cannot use reserved SAM provenance tag PG\n",
+              roles[i].option_name);
+      return -1;
+    }
+  }
+  for (int i=0; i<n; ++i){
+    for (int j=i+1; j<n; ++j){
+      if (strcmp(roles[i].tag, roles[j].tag) == 0){
+        fprintf(stderr, "%s and %s cannot use the same SAM tag %s\n",
+                roles[i].option_name, roles[j].option_name, roles[i].tag);
+        return -1;
+      }
+    }
+  }
+  return 0;
 }
 
 static int parse_int_opt(const char *name, const char *value, int min_value, int *out){
@@ -149,8 +213,10 @@ static void usage(void){
 "  --end-bin <INT>        Add strand-aware transcript end bins to grouping key (default: off)\n"
 "\n"
 "OUTPUTS:\n"
+"  Secondary/supplementary records inherit primary-read status\n"
 "  --emit-tsv             Also write <out>.molecules.tsv and <out>.assignments.tsv\n"
 "  --emit-explain         Also write <out>.corrections.tsv with merge confidence/details\n"
+"  --strip-pg             Remove all header @PG lines and record-level PG tags\n"
 "  --no-bam-dup-flag      Do not set/clear the standard SAM duplicate bit\n"
 "  --keep-tmp             Keep bucket temp files (default: delete after finish)\n"
 "\n"
@@ -163,6 +229,7 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
   memset(o, 0, sizeof(*o));
   strvec_init(&o->bam_list);
   o->out_prefix = NULL;
+  o->command_line = build_command_line(argc, argv);
   o->tmp_dir = NULL;
   o->buckets = 64;
   o->threads = 4;
@@ -190,8 +257,9 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
   o->keep_tmp = 0;
   o->isolate_inputs = 0;
   o->set_bam_dup_flag = 1;
+  o->strip_pg = 0;
 
-  if (!o->cell_tag || !o->umi_tag || !o->umi_qual_tag || !o->gene_tag || !o->umi_out || !o->dup_flag || !o->input_scope_tag){
+  if (!o->command_line || !o->cell_tag || !o->umi_tag || !o->umi_qual_tag || !o->gene_tag || !o->umi_out || !o->dup_flag || !o->input_scope_tag){
     fprintf(stderr, "out of memory while initializing defaults\n");
     return -1;
   }
@@ -229,6 +297,7 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
     {"input-scope-tag", required_argument, 0, 27},
     {"no-bam-dup-flag", no_argument, 0, 28},
     {"correction-method", required_argument, 0, 29},
+    {"strip-pg", no_argument, 0, 30},
     {0,0,0,0}
   };
 
@@ -329,10 +398,12 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
       case 29:
         if (parse_correction_method(optarg, &o->correction_method) != 0) return -1;
         break;
+      case 30: o->strip_pg=1; break;
       default: usage(); return -1;
     }
   }
 
+  if (validate_tag_configuration(o) != 0) return -1;
   if (o->correction_method == CORRECTION_DIRECTIONAL &&
       o->min_merge_confidence > 0.0){
     fprintf(stderr,
@@ -360,6 +431,7 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
 void free_opts(cli_opts_t *o){
   if (!o) return;
   free(o->out_prefix);
+  free(o->command_line);
   free(o->tmp_dir);
   free(o->cell_tag); free(o->umi_tag); free(o->umi_qual_tag); free(o->gene_tag);
   free(o->source_tag);

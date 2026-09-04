@@ -12,7 +12,7 @@ Long-read single-cell transcriptomic assays enable isoform-resolved analysis but
 
 IsoUMI is implemented in C and uses htslib for BAM/SAM I/O. The software is released under the MIT license.
 
-- Source code: https://github.com/your-org/IsoUMI
+- Source code: https://github.com/dawangran/IsoUMI
 - Version described here: 0.1.0
 - Archive DOI: to be added after release
 

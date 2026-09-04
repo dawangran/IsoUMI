@@ -105,6 +105,7 @@ sh "$repo_dir/scripts/benchmark_isoumi.sh" \
 
 test -s "$tmpdir/metrics.tsv"
 grep -q '^dataset	label	version	input_path	input_format	input_size_bytes	input_reads	input_cell_barcodes	input_umis' "$tmpdir/metrics.tsv"
+awk -F '\t' 'NF != 19 {exit 1}' "$tmpdir/metrics.tsv"
 grep -q '^synthetic_truth	default	' "$tmpdir/metrics.tsv"
 grep -q '^synthetic_truth	baseline_no_structure	' "$tmpdir/metrics.tsv"
 

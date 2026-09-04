@@ -9,6 +9,7 @@ benchmarks/output/
 *.sam
 *.tsv
 .DS_Store
+.ipynb_checkpoints/
 .worktrees/
 !examples/*.sam
 !examples/*.tsv

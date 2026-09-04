@@ -69,6 +69,9 @@ test: $(BIN)
 	sh ../tests/synthetic_truth.sh ./$(BIN)
 	sh ../tests/bam_tags.sh ./$(BIN)
 	sh ../tests/directional.sh ./$(BIN)
+	sh ../tests/header_merge.sh ./$(BIN)
+	sh ../tests/non_primary.sh ./$(BIN)
+	sh ../tests/integrity.sh ./$(BIN)
 
 clean:
 	rm -f $(OBJS) $(DEPFILES) $(BIN)

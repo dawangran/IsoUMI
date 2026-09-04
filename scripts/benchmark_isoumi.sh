@@ -182,9 +182,9 @@ detect_time_mode() {
 }
 
 time_mode=$(detect_time_mode)
-version=$("$bin" --version 2>&1)
+version=$("$bin" --version)
 
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   dataset label version input_path input_format input_size_bytes input_reads input_cell_barcodes input_umis \
   threads buckets started_at_utc ended_at_utc elapsed_seconds peak_rss_kb peak_rss_mb exit_status mode_params command \
   > "$metrics"

@@ -1,0 +1,5 @@
+{
+  "IsoUMIWorkflow.bams": [
+    "/absolute/path/to/input.bam"
+  ]
+}
