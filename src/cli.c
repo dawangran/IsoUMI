@@ -205,11 +205,14 @@ static void usage(void){
 "                         Optional confidence floor (default: 0.00)\n"
 "  --no-quality-aware     Ignore UMI quality when ranking/explaining merges\n"
 "  --no-gene              Ignore gene in grouping\n"
+"  --structure-mode <exact|compatible>  Structural grouping (default: exact)\n"
+"  --sj-tolerance <INT>   Compatible mode: direct junction tolerance (default: 10 bp)\n"
+"  --min-structure-support <INT>  Preferred ambiguous-read anchor support (default: 3)\n"
 "  --no-structure         Baseline mode: ignore SJ/locus/end structure in grouping\n"
 "  --isolate-inputs       Treat each input file/list entry as a separate source\n"
 "  --input-scope-tag <TAG> Temporary tag for --isolate-inputs (default: zi)\n"
-"  --locus-bin <INT>      Bin (bp) for non-spliced reads (default: 1000)\n"
-"  --sj-jitter <INT>      Round SJ boundaries to nearest jitter multiple before hashing (default: 10)\n"
+"  --locus-bin <INT>      Exact mode: non-spliced coordinate bins (default: 1000 bp)\n"
+"  --sj-jitter <INT>      Exact mode: SJ rounding grid (default: 10 bp)\n"
 "  --end-bin <INT>        Add strand-aware transcript end bins to grouping key (default: off)\n"
 "\n"
 "OUTPUTS:\n"
@@ -245,6 +248,9 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
   o->no_gene = 0;
   o->no_structure = 0;
   o->correction_method = CORRECTION_RATIO;
+  o->structure_mode = STRUCTURE_EXACT;
+  o->sj_tolerance = 10;
+  o->min_structure_support = 3;
   o->ham = 1;
   o->ratio = 0.1;
   o->min_merge_confidence = 0.0;
@@ -298,6 +304,9 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
     {"no-bam-dup-flag", no_argument, 0, 28},
     {"correction-method", required_argument, 0, 29},
     {"strip-pg", no_argument, 0, 30},
+    {"structure-mode", required_argument, 0, 31},
+    {"sj-tolerance", required_argument, 0, 32},
+    {"min-structure-support", required_argument, 0, 33},
     {0,0,0,0}
   };
 
@@ -399,10 +408,25 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
         if (parse_correction_method(optarg, &o->correction_method) != 0) return -1;
         break;
       case 30: o->strip_pg=1; break;
+      case 31:
+        if (strcmp(optarg,"exact")==0) o->structure_mode=STRUCTURE_EXACT;
+        else if (strcmp(optarg,"compatible")==0) o->structure_mode=STRUCTURE_COMPATIBLE;
+        else { fprintf(stderr,"--structure-mode must be exact or compatible\n"); return -1; }
+        break;
+      case 32:
+        if (parse_int_opt("--sj-tolerance",optarg,0,&o->sj_tolerance)!=0) return -1;
+        break;
+      case 33:
+        if (parse_int_opt("--min-structure-support",optarg,1,&o->min_structure_support)!=0) return -1;
+        break;
       default: usage(); return -1;
     }
   }
 
+  if (o->structure_mode == STRUCTURE_COMPATIBLE && (o->no_structure || o->end_bin)){
+    fprintf(stderr,"--structure-mode compatible is incompatible with --no-structure and --end-bin\n");
+    return -1;
+  }
   if (validate_tag_configuration(o) != 0) return -1;
   if (o->correction_method == CORRECTION_DIRECTIONAL &&
       o->min_merge_confidence > 0.0){

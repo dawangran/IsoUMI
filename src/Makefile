@@ -50,7 +50,7 @@ endif
 INC := $(HTS_CFLAGS)
 LIBS := $(HTS_LDFLAGS)
 
-OBJS = main.o cli.o io.o sj.o key.o umi.o vector.o key_build.o pipeline.o
+OBJS = main.o cli.o io.o sj.o key.o umi.o vector.o key_build.o structure.o pipeline.o
 DEPFILES = $(OBJS:.o=.d)
 BIN = isoumi
 
@@ -65,6 +65,9 @@ $(BIN): $(OBJS)
 .PHONY: all test clean
 
 test: $(BIN)
+	@geometry_test=$$(mktemp "$${TMPDIR:-/tmp}/isoumi-geometry.XXXXXX"); \
+	trap 'rm -f "$$geometry_test"' EXIT HUP INT TERM; \
+	$(CC) $(CFLAGS) $(INC) $(EXTRA_CFLAGS) -o "$$geometry_test" ../tests/structure_geometry.c key_build.o key.o sj.o $(LDFLAGS) $(LIBS) $(EXTRA_LDFLAGS) && "$$geometry_test"
 	sh ../tests/smoke.sh ./$(BIN)
 	sh ../tests/synthetic_truth.sh ./$(BIN)
 	sh ../tests/bam_tags.sh ./$(BIN)
@@ -72,6 +75,7 @@ test: $(BIN)
 	sh ../tests/header_merge.sh ./$(BIN)
 	sh ../tests/non_primary.sh ./$(BIN)
 	sh ../tests/integrity.sh ./$(BIN)
+	python3 ../tests/compatible.py ./$(BIN)
 
 clean:
 	rm -f $(OBJS) $(DEPFILES) $(BIN)

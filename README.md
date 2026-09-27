@@ -225,6 +225,35 @@ on their own, establish greater molecular accuracy. Reported merge confidence
 is a heuristic score, not a posterior probability. Directional pairwise
 comparison can be costly for groups with many distinct UMIs.
 
+## Compatible structural grouping (experimental)
+
+The optional compatible mode groups reads affected by truncation or small
+splice-coordinate shifts:
+
+```bash
+src/isoumi --bam input.bam --out compatible \
+  --structure-mode compatible --sj-tolerance 10 \
+  --min-structure-support 3 \
+  --correction-method directional --ham 1 --emit-tsv --emit-explain
+```
+
+This mode compares observed alignment geometry directly. It constructs local
+UMI candidate neighborhoods, groups compatible structures, and recomputes UMI
+correction from the raw counts within each final structure group. Partial reads
+can attach to compatible longer structures without joining conflicting anchors.
+Low-support observations with incompatible geometry remain separate.
+
+`--structure-mode exact` preserves the existing grid-based grouping and is the
+default. The compatible mode is incompatible with `--no-structure` and
+`--end-bin`; `--sj-jitter` and `--locus-bin` configure only exact mode. See the
+[parameter guide](docs/parameters.md#--structure-mode-exactcompatible-default-exact).
+
+Compatibility is an inference from alignments, not molecular ground truth.
+Shared truncated fragments can be ambiguous, nearby genuine splice sites can
+fall within the tolerance, and overlapping unspliced reads may not distinguish
+alternative transcript ends. Evaluate assignment ambiguity, splitting and
+mixing alongside molecule counts before using this mode for quantification.
+
 ## Common configurations
 
 These examples illustrate specific analysis choices; they are not universal
