@@ -1,34 +1,39 @@
 # Contributing
 
-IsoUMI is developed as a small command-line C tool. Keep changes focused, reproducible, and easy to audit.
+Keep changes focused, reproducible, and documented. Report bugs with the
+software version, command, error log, and a minimal input when possible.
 
-## Development Setup
+## Development setup
 
-Build the command-line tool:
+Install a C11 compiler, GNU Make, HTSlib, pkg-config, Python 3, and samtools.
+See the [installation instructions](README.md#installation) for package names.
 
 ```bash
 make
-```
-
-Run the smoke test:
-
-```bash
 make test
+sh examples/run_minimal.sh
 ```
 
-The smoke test constructs synthetic SAM inputs and verifies that IsoUMI produces a deduplicated BAM plus molecule, assignment, and correction reports.
+`make test` runs seven regression scripts covering UMI correction, synthetic
+truth, BAM tags, header merging, non-primary alignments, and input/output
+integrity, followed by release metadata checks. Tests that inspect BAM records
+require samtools; a skipped test is not a complete validation run. GitHub CI
+installs all test dependencies and runs the full suite on Ubuntu.
 
-## Code Guidelines
+## Changes and tests
 
-- Keep public command-line behavior documented in `README.md`.
-- Add or update tests when changing UMI correction, grouping, report columns, or BAM tag semantics.
-- Avoid changing output column names without documenting the compatibility impact.
-- Keep the version in `VERSION`, `CITATION.cff`, `README.md`, and `src/cli.c` synchronized.
+- Document CLI behavior in `README.md` and detailed options in
+  [`docs/parameters.md`](docs/parameters.md).
+- Add or update regression tests when changing correction, grouping, report
+  columns, or BAM semantics.
+- Describe compatibility changes in `CHANGELOG.md`.
+- Keep `VERSION`, `src/cli.h`, `CITATION.cff`, and documented versions consistent.
+- Keep small, deterministic fixtures in `examples/` or the test scripts. Store
+  generated analyses and manuscript materials outside version control, such as
+  in the ignored `artifacts/` directory.
 
-## Release Checklist
+## Releases
 
-- `make clean && make`
-- `make test`
-- `src/isoumi --version`
-- Confirm `README.md`, `CHANGELOG.md`, and `CITATION.cff` match the release version.
-- Create a tagged release and archive it with a DOI provider such as Zenodo before manuscript submission.
+Follow the [release checklist](docs/release_checklist.md), verify a clean build
+and the full test suite, then tag the tested commit. Cite and archive the exact
+software revision used for a published analysis.

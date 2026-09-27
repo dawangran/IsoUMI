@@ -40,9 +40,12 @@ On Ubuntu/Debian, install build and test dependencies:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libhts-dev samtools python3 \
-  libcurl4-openssl-dev zlib1g-dev libbz2-dev liblzma-dev
+sudo apt-get install --yes --no-install-recommends \
+  build-essential pkg-config libhts-dev samtools python3
 ```
+
+The package manager installs the compression and network libraries required by
+`libhts-dev`; a separate curl development package is not needed.
 
 Then build and check the executable:
 

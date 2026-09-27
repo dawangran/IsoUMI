@@ -1,36 +1,40 @@
-# IsoUMI Release Checklist
+# Release checklist
 
-Use this checklist before tagging a release for manuscript submission.
+Use a clean checkout of the commit intended for release.
 
-## Required Metadata
+## Version and metadata
 
-- `VERSION` contains the release version.
-- `src/cli.c` prints the same version through `src/isoumi --version`.
-- `README.md`, `CHANGELOG.md`, and `CITATION.cff` use the same release version.
-- `CITATION.cff` contains the final repository URL and archive DOI.
-- `LICENSE` matches the approved project license.
+- Keep `VERSION`, `src/cli.h`, `CITATION.cff`, `CHANGELOG.md`, and the README
+  version in sync; confirm with `src/isoumi --version`.
+- Confirm the repository URL, contributor metadata, and license.
+- Update the changelog with user-visible changes and compatibility notes.
+- Verify the documented container tag and WDL settings if publishing an image.
 
-## Build And Test
+## Build and validation
+
+Install all test dependencies, including Python 3 and samtools, then run:
 
 ```bash
-make clean
 make
 make test
 make check-release
 sh examples/run_minimal.sh
 ```
 
-`make check-release` runs the strict metadata gate and fails until placeholder
-repository URLs and archive DOI text have been replaced.
+Require successful GitHub CI for the release commit. Investigate any skipped
+local tests before declaring validation complete. `make check-release` checks
+version consistency, required metadata files, and unfinished repository or
+archive placeholders; it does not verify remote availability or require a DOI.
 
-## Manuscript Artifacts
+## Publish and archive
 
-- Application note draft updated in `docs/application_note.md`.
-- Workflow figure exported and referenced in the manuscript.
-- Benchmark scripts and datasets archived or linked; use `scripts/benchmark_isoumi.sh` as the command template.
-- Release tag created.
-- DOI archived through Zenodo or another repository.
+- Create a version tag for the tested commit and describe its changes.
+- Build container images from that commit and record their immutable digests.
+- Archive the tagged source and reproducibility materials when preparing a
+  published analysis; add a verified archive DOI to `CITATION.cff` when available.
+- Record input accessions or checksums, reference/annotation versions, exact
+  commands, and comparison settings with benchmark results.
 
-## Submission Notes
-
-For an Application Note submission, report the exact release version, repository URL, license, dependencies, and availability of example or benchmark data.
+Keep unpublished manuscripts and internal writing plans outside the software
+repository. The [benchmark guide](../benchmarks/README.md) describes the supplied
+fixtures and execution scripts.

@@ -32,7 +32,7 @@ isolate_inputs = false
 end_bin = 0
 threads = 4
 buckets = 64
-memory = "8 GB"
+memory = "32 GB"
 ```
 
 Disk allocation is intentionally not exposed by the workflow. Local runs use

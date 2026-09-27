@@ -1,15 +1,25 @@
-*.o
-*.d
-src/isoumi
-tmp_buckets/
-examples/output/
-benchmarks/output/
+# Compiled executable and dependency files
+/src/*.o
+/src/*.d
+/src/isoumi
+
+# Local analyses, manuscript files, and generated outputs
+/artifacts/
+/examples/output/
+/benchmarks/output*/
+/tmp_buckets/
+/workflow-output/
+/cromwell-executions/
+/cromwell-workflow-logs/
 *.bam
 *.bai
-*.sam
-*.tsv
-.DS_Store
+*.csi
+
+# Local environments, caches, and worktrees
+.venv/
+venv/
+__pycache__/
+*.py[cod]
 .ipynb_checkpoints/
-.worktrees/
-!examples/*.sam
-!examples/*.tsv
+/.worktrees/
+.DS_Store

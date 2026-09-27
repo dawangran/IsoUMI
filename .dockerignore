@@ -1,15 +1,20 @@
-.git
-.github
-.worktrees
-benchmarks/output
-examples/output
-tmp_buckets
+# Include only the inputs used by Dockerfile.
+**
+!Dockerfile
+!Makefile
+!VERSION
+!src/
+!src/**
+!docker/
+!docker/**
+!examples/
+!examples/minimal.sam
+!notebooks/
+!notebooks/**
+
+# Build from source and omit local notebook caches.
 src/*.o
 src/*.d
 src/isoumi
-*.bam
-*.bai
-*.tsv
-*.log
-__pycache__
-.ipynb_checkpoints
+**/__pycache__/
+**/.ipynb_checkpoints/
