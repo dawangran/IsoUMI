@@ -11,6 +11,12 @@ typedef enum {
 
 typedef enum { STRUCTURE_EXACT = 0, STRUCTURE_COMPATIBLE = 1 } structure_mode_t;
 
+typedef enum {
+  STRAND_AUTO = 0,
+  STRAND_ALIGNMENT = 1,
+  STRAND_IGNORE = 2
+} strand_mode_t;
+
 typedef struct {
   strvec_t bam_list;
   char *out_prefix, *command_line;
@@ -22,6 +28,7 @@ typedef struct {
   int  keep_tmp, isolate_inputs, set_bam_dup_flag, strip_pg;
   correction_method_t correction_method;
   structure_mode_t structure_mode;
+  strand_mode_t strand_mode;
   int sj_tolerance, min_structure_support;
   double ratio, min_merge_confidence;
 } cli_opts_t;

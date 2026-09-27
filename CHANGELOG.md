@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Allows otherwise matching gene-tagged reads expected to represent one molecule
+  to remain together when they align in both directions. New
+  `--strand-mode auto` (default) ignores BAM alignment
+  direction for reads with a nonempty valid SAM `Z` string in the selected gene tag;
+  missing/unusable gene tags and `--no-gene` retain direction separation.
+- Adds `--strand-mode alignment` to reproduce historical grouping and
+  `--strand-mode ignore` to omit direction regardless of gene annotations.
+  The policy applies to exact, compatible, and no-structure grouping with both
+  correction methods. Ignored direction uses genomic `EL`/`ER` end bins.
+  Default grouping keys and molecule IDs change for gene-tagged reads even
+  when molecule counts do not. Raw UMI strings, sequences, and alignment orientation
+  remain unchanged; transcript strand is not inferred.
+  Mixed directions depend on library preparation and upstream orientation;
+  `auto` does not detect either, and the regression evidence is synthetic.
 - Adds experimental `--structure-mode compatible` with direct splice-coordinate
   tolerance and truncation-aware structural assignment. Raw UMI Hamming
   neighborhoods limit the search; UMI correction is recomputed within final

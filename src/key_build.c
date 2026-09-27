@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <string.h>
 
-static char strand_char(bam1_t* b){ return (b->core.flag & BAM_FREVERSE) ? '-' : '+'; }
 static hts_pos_t bin_coord(hts_pos_t x, int bin){ return bin > 0 ? (x / bin) * bin : x; }
 
 char* escape_key_component(const char* value){
@@ -45,9 +44,11 @@ char* escape_key_component(const char* value){
 
 char* build_group_key(bam1_t* b, const char* cell_tag, const char* gene_tag,
                       const char* source_tag, const char* input_scope_tag,
-                      int no_gene, int no_structure, int locus_bin, int sj_jitter, int end_bin){
+                      int no_gene, int no_structure, int locus_bin, int sj_jitter, int end_bin,
+                      strand_mode_t strand_mode){
   const char* cb = get_tag_Z(b, cell_tag);
-  const char* gx = NULL; if (!no_gene) gx = get_tag_Z(b, gene_tag);
+  const uint8_t* gene_aux = (!no_gene && gene_tag) ? bam_aux_get(b, gene_tag) : NULL;
+  const char* gx = gene_aux ? bam_aux2Z(gene_aux) : NULL;
   const char* src = source_tag ? get_tag_Z(b, source_tag) : NULL;
   const char* input_scope = input_scope_tag ? get_tag_Z(b, input_scope_tag) : NULL;
   int tid = b ? b->core.tid : -1;
@@ -62,16 +63,25 @@ char* build_group_key(bam1_t* b, const char* cell_tag, const char* gene_tag,
   const char* srcv = source_tag ? (src ? src_escaped : "NA") : "";
   const char* input_prefix = input_scope_tag ? "|IN=" : "";
   const char* inputv = input_scope_tag ? (input_scope ? input_escaped : "NA") : "";
-  char strch = strand_char(b);
+  /* BAM_FREVERSE describes the alignment, not the originating RNA strand.
+     A nonempty gene assignment already scopes auto mode to an annotated gene.
+     Without that scope, retain the legacy separation unless explicitly disabled. */
+  int has_gene_assignment = gene_aux && *gene_aux == 'Z' && gx && gx[0];
+  int use_alignment_strand = strand_mode == STRAND_ALIGNMENT ||
+    (strand_mode == STRAND_AUTO && !has_gene_assignment);
+  int reverse = use_alignment_strand && b && (b->core.flag & BAM_FREVERSE);
+  char strch = use_alignment_strand ? (reverse ? '-' : '+') : '.';
   const char* key_fmt = no_structure
     ? "CB=%s|GX=%s%s%s%s%s|TID=%d|STR=%c|CTX=NA"
     : end_bin > 0
-    ? "CB=%s|GX=%s%s%s%s%s|TID=%d|STR=%c|%s=%016llx|E5=%" PRId64 "|E3=%" PRId64
+    ? (use_alignment_strand
+       ? "CB=%s|GX=%s%s%s%s%s|TID=%d|STR=%c|%s=%016llx|E5=%" PRId64 "|E3=%" PRId64
+       : "CB=%s|GX=%s%s%s%s%s|TID=%d|STR=%c|%s=%016llx|EL=%" PRId64 "|ER=%" PRId64)
     : "CB=%s|GX=%s%s%s%s%s|TID=%d|STR=%c|%s=%016llx";
   hts_pos_t pos = b ? b->core.pos : -1;
   hts_pos_t end_pos = b ? bam_endpos(b) : -1;
-  hts_pos_t tx5 = (b && (b->core.flag & BAM_FREVERSE)) ? end_pos : pos;
-  hts_pos_t tx3 = (b && (b->core.flag & BAM_FREVERSE)) ? pos : end_pos;
+  hts_pos_t tx5 = reverse ? end_pos : pos;
+  hts_pos_t tx3 = reverse ? pos : end_pos;
   hts_pos_t e5 = bin_coord(tx5, end_bin);
   hts_pos_t e3 = bin_coord(tx3, end_bin);
   if ((cb && !cb_escaped) || (!no_gene && gx && !gx_escaped) ||

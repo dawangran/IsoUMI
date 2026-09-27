@@ -205,6 +205,9 @@ static void usage(void){
 "                         Optional confidence floor (default: 0.00)\n"
 "  --no-quality-aware     Ignore UMI quality when ranking/explaining merges\n"
 "  --no-gene              Ignore gene in grouping\n"
+"  --strand-mode <auto|alignment|ignore>  Alignment-strand grouping (default: auto)\n"
+"                         auto ignores strand with a nonempty Z gene tag when gene grouping is enabled\n"
+"                         Otherwise auto uses alignment direction\n"
 "  --structure-mode <exact|compatible>  Structural grouping (default: exact)\n"
 "  --sj-tolerance <INT>   Compatible mode: direct junction tolerance (default: 10 bp)\n"
 "  --min-structure-support <INT>  Preferred ambiguous-read anchor support (default: 3)\n"
@@ -213,7 +216,7 @@ static void usage(void){
 "  --input-scope-tag <TAG> Temporary tag for --isolate-inputs (default: zi)\n"
 "  --locus-bin <INT>      Exact mode: non-spliced coordinate bins (default: 1000 bp)\n"
 "  --sj-jitter <INT>      Exact mode: SJ rounding grid (default: 10 bp)\n"
-"  --end-bin <INT>        Add strand-aware transcript end bins to grouping key (default: off)\n"
+"  --end-bin <INT>        Bin transcript ends, or genomic left/right when strand is ignored (default: off)\n"
 "\n"
 "OUTPUTS:\n"
 "  Secondary/supplementary records inherit primary-read status\n"
@@ -249,6 +252,7 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
   o->no_structure = 0;
   o->correction_method = CORRECTION_RATIO;
   o->structure_mode = STRUCTURE_EXACT;
+  o->strand_mode = STRAND_AUTO;
   o->sj_tolerance = 10;
   o->min_structure_support = 3;
   o->ham = 1;
@@ -307,6 +311,7 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
     {"structure-mode", required_argument, 0, 31},
     {"sj-tolerance", required_argument, 0, 32},
     {"min-structure-support", required_argument, 0, 33},
+    {"strand-mode", required_argument, 0, 34},
     {0,0,0,0}
   };
 
@@ -418,6 +423,12 @@ int parse_args(int argc, char **argv, cli_opts_t *o){
         break;
       case 33:
         if (parse_int_opt("--min-structure-support",optarg,1,&o->min_structure_support)!=0) return -1;
+        break;
+      case 34:
+        if (strcmp(optarg,"auto")==0) o->strand_mode=STRAND_AUTO;
+        else if (strcmp(optarg,"alignment")==0) o->strand_mode=STRAND_ALIGNMENT;
+        else if (strcmp(optarg,"ignore")==0) o->strand_mode=STRAND_IGNORE;
+        else { fprintf(stderr,"--strand-mode must be auto, alignment or ignore\n"); return -1; }
         break;
       default: usage(); return -1;
     }

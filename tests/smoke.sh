@@ -221,6 +221,7 @@ SAM
 "$bin" \
   --bam "$tmpdir/endbin.sam" \
   --out "$tmpdir/endbin_off" \
+  --strand-mode alignment \
   --tmp-dir "$tmpdir/endbin_off_buckets" \
   --threads 1 \
   --buckets 2 \
@@ -229,6 +230,7 @@ SAM
 "$bin" \
   --bam "$tmpdir/endbin.sam" \
   --out "$tmpdir/endbin_on" \
+  --strand-mode alignment \
   --tmp-dir "$tmpdir/endbin_on_buckets" \
   --threads 1 \
   --buckets 2 \

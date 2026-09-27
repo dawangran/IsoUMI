@@ -76,6 +76,7 @@ test: $(BIN)
 	sh ../tests/non_primary.sh ./$(BIN)
 	sh ../tests/integrity.sh ./$(BIN)
 	python3 ../tests/compatible.py ./$(BIN)
+	python3 ../tests/strand.py ./$(BIN)
 
 clean:
 	rm -f $(OBJS) $(DEPFILES) $(BIN)

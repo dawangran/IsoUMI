@@ -1691,7 +1691,7 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam,
     key = build_group_key(b, o->cell_tag, o->gene_tag,
                           o->source_tag, active_input_scope_tag(o),
                           o->no_gene, o->no_structure || o->structure_mode == STRUCTURE_COMPATIBLE,
-                          o->locus_bin, o->sj_jitter, o->end_bin);
+                          o->locus_bin, o->sj_jitter, o->end_bin, o->strand_mode);
     if (!key) goto fail;
     if (use_qual) umi_qual = get_tag_Z(b, o->umi_qual_tag);
     if (aggregate_table_add(&table, key, umi, umi_qual, b, current_ordinal) != 0){
@@ -1769,7 +1769,7 @@ static int build_compatible_mapping(const cli_opts_t* o, const char* path,
     const map_item_t* item;
     if (is_unmapped(b) || is_non_primary(b) || !raw || !cb) continue;
     key=build_group_key(b,o->cell_tag,o->gene_tag,o->source_tag,active_input_scope_tag(o),
-                        o->no_gene,1,o->locus_bin,o->sj_jitter,0);
+                        o->no_gene,1,o->locus_bin,o->sj_jitter,0,o->strand_mode);
     if (!key) goto fail;
     item=find_in_key_map(*maps,*nm,key,raw);
     if (!item){ free(key); goto fail; }
@@ -1814,7 +1814,7 @@ static char* read_group_key(const cli_opts_t* o, bam1_t* b, long ordinal,
     return key ? sdup(key) : NULL;
   }
   return build_group_key(b,o->cell_tag,o->gene_tag,o->source_tag,active_input_scope_tag(o),
-                          o->no_gene,o->no_structure,o->locus_bin,o->sj_jitter,o->end_bin);
+                          o->no_gene,o->no_structure,o->locus_bin,o->sj_jitter,o->end_bin,o->strand_mode);
 }
 
 typedef struct {

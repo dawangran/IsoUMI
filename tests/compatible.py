@@ -77,7 +77,7 @@ unique_e = copies('unique_e',2,[(100,600)],gene='unique')
 # One junction cannot match two tiny introns merely because both are within tol.
 short_a = copies('short_a',3,[(90,100),(102,200),(300,400),(500,520)],gene='short_n')
 short_b = copies('short_b',3,[(90,95),(97,105),(107,115)],gene='short_n')
-# Boundary dimensions must all remain effective.
+# Gene-assigned alignment directions merge by default; other boundaries remain.
 scopes=[]
 for label,kwargs in [('base',{}),('cell',{'cell':'C2'}),('strand',{'strand':16}),
                      ('source',{'source':'T'}),('contig',{'contig':'chr2'})]:
@@ -144,7 +144,10 @@ with tempfile.TemporaryDirectory(prefix='isoumi-compatible-') as td:
     assert all(r['structure_status']=='unsupported' for r in rows if r['qname'] in unique_d)
     assert same_group(rows,short_a) != same_group(rows,short_b)
     assert all(r['structure_status']=='compatible' for r in rows if r['qname'] in short_a | short_b)
-    assert len({same_group(rows,names) for names in scopes})==len(scopes)
+    assert same_group(rows,scopes[0])==same_group(rows,scopes[2])
+    assert len({same_group(rows,names) for names in scopes})==len(scopes)-1
+    alignment_rows,_,_=run('alignment',flags=['--strand-mode','alignment'])
+    assert len({same_group(alignment_rows,names) for names in scopes})==len(scopes)
     reversed_rows,_,_=run('reversed',(reversed_input,),buckets=7,threads=2)
     assert partition(reversed_rows)==partition(rows)
     exact,_,_=run('exact',compatible=False)
