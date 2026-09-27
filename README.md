@@ -16,9 +16,10 @@
 
 IsoUMI corrects unique molecular identifiers (UMIs) and marks duplicate reads in
 long-read single-cell BAM files. It restricts UMI comparisons by cell barcode,
-gene, strand, and alignment context: splice-junction chains for spliced reads,
-or genomic start/end bins for non-spliced reads. Optional transcript-end bins
-and sample boundaries provide additional control over grouping.
+gene, configurable alignment direction, and alignment context: splice-junction
+chains for spliced reads, or genomic start/end bins for non-spliced reads.
+Optional alignment-end bins and sample boundaries provide additional control
+over grouping.
 
 The tool writes corrected UMI tags, duplicate labels, and optional audit tables.
 It operates on existing alignments and annotations; it does not align reads,
@@ -26,8 +27,11 @@ assign genes, or reconstruct transcript isoforms.
 
 ## Installation
 
-The current source version is **0.1.1**. Build from source on Linux or macOS, or
-use the [Docker image](#docker-and-jupyterlab).
+The current source version is **0.1.1**. Changes under
+[Unreleased](CHANGELOG.md#unreleased), including the strand-grouping fix, require
+building the current source and are not part of the published 0.1.1 release.
+Build from source on Linux or macOS, or use the
+[Docker image](#docker-and-jupyterlab) for the published release.
 
 ### Build from source
 
@@ -88,7 +92,9 @@ src/isoumi \
 ```
 
 This uses **ratio correction** with Hamming distance `1` and a maximum
-low-count/high-count ratio of `0.10`. It produces:
+low-count/high-count ratio of `0.10`. In current source, the default
+`--strand-mode auto` lets opposite alignment directions share a molecule group
+when the selected gene tag is present and nonempty. It produces:
 
 | File | Contents |
 | --- | --- |
@@ -137,6 +143,26 @@ Use `--no-gene` to omit gene annotations, or remap tags such as
 `--cell-tag XC --umi-tag XM --gene-tag GN`. Tag names must be valid, distinct
 SAM tags; `PG` is reserved for program provenance. UMI comparison uses Hamming
 distance and therefore compares equal-length strings.
+
+The default `--strand-mode auto` trusts a nonempty SAM `Z` string in the selected gene
+tag and ignores the read's BAM alignment direction for that record. Reads with
+the same cell, gene, UMI, and alignment context can therefore form one molecule
+even when their alignments use both directions. Reads without a usable gene tag,
+or all reads with `--no-gene`, retain alignment-direction separation. Use
+`--strand-mode alignment` to reproduce the earlier direction-based grouping, or
+`--strand-mode ignore` to ignore direction even without gene annotations.
+
+Whether opposite alignment directions can represent one RNA molecule depends
+on library preparation and upstream read orientation. `auto` checks gene tags;
+it does not detect the protocol or whether reads have already been oriented.
+Choose `alignment` when direction remains an informative molecule boundary.
+
+This changes grouping keys and molecule IDs for gene-tagged reads, even when
+molecule counts do not change. IsoUMI does not infer RNA transcription strand,
+reverse-complement UMI tags, or change alignment orientation. Gene annotations
+must distinguish features that should remain separate: same-gene antisense
+reads cannot be resolved by this policy alone, and UMI collisions remain possible.
+See the [strand-mode guide](docs/parameters.md#--strand-mode-autoalignmentignore-default-auto).
 
 ### Multiple inputs
 
@@ -187,19 +213,21 @@ files may reuse read names.
 
 IsoUMI partitions records into cell-barcode buckets, then corrects UMIs within
 keys containing cell, gene (unless disabled), optional source, reference,
-strand, and alignment context.
+alignment direction according to `--strand-mode`, and alignment context.
 
 | Read context | Default grouping |
 | --- | --- |
 | Spliced (`N` in CIGAR) | Junction chain with boundaries rounded to the nearest 10 bp |
 | Non-spliced | Pair of genomic start and exclusive end bins, each 1,000 bp wide |
-| Optional transcript ends | Strand-aware 5′ and 3′ bins set with `--end-bin` |
+| Optional alignment ends | Genomic left/right bins when direction is ignored; direction-oriented 5′/3′ bins otherwise, set with `--end-bin` |
 
 `--sj-jitter` specifies rounding to a fixed grid, not a pairwise distance
 threshold. Reads on opposite sides of a rounding boundary can fall into
 different groups even when their coordinates differ by only one base.
 `--no-structure` omits junction, locus, and end terms while retaining cell,
-gene, source, reference, and strand.
+gene, source, reference, and the selected alignment-direction policy. The same
+`--strand-mode` policy applies to exact, compatible, and no-structure grouping,
+with either correction method.
 
 Two correction methods are available:
 
@@ -269,8 +297,12 @@ src/isoumi --bam input.bam --out directional \
 src/isoumi --bam input.bam --out conservative \
   --ratio 0.05 --min-merge-confidence 0.60 --emit-explain
 
-# Add 50 bp transcript-end bins
+# Add 50 bp alignment-end bins
 src/isoumi --bam input.bam --out end_aware --end-bin 50 --emit-tsv
+
+# Reproduce historical alignment-direction grouping
+src/isoumi --bam input.bam --out legacy \
+  --strand-mode alignment --emit-tsv
 
 # Compare the same correction method without alignment structure
 src/isoumi --bam input.bam --out no_structure \

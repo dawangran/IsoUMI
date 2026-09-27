@@ -190,15 +190,68 @@ keys.
 Grouping parameters decide which reads are allowed to compare UMIs. They do not
 directly change UMI distance calculations.
 
+### `--strand-mode <auto|alignment|ignore>` default `auto`
+
+Controls whether BAM alignment direction (`FLAG 0x10`) separates molecule
+groups. Alignment direction does not necessarily identify the RNA's transcription
+strand. Reads expected to represent one RNA molecule may have opposite alignment
+directions in some cDNA workflows before orientation normalization. Whether this
+is expected depends on library preparation and upstream processing; it is not a
+universal property of long-read RNA sequencing.
+
+| Mode | Grouping behavior |
+| --- | --- |
+| `auto` | With gene grouping enabled and a nonempty, valid `Z` string in the selected `--gene-tag` (default `GX`), use `STR=.` and ignore alignment direction. Otherwise retain direction as `STR=+` or `STR=-`. |
+| `alignment` | Always retain `FLAG 0x10` as `STR=+` or `STR=-`, reproducing the earlier grouping policy. |
+| `ignore` | Always use `STR=.`, including missing gene tags and `--no-gene`. |
+
+`auto` is a gene-tag heuristic, not protocol or transcript-strand inference. It
+does not determine whether upstream processing has already oriented the reads.
+Use `alignment` when direction should remain a molecule boundary, including
+appropriately oriented inputs for which opposite alignments need to be kept
+separate. The synthetic mixed-FLAG regression demonstrates grouping behavior;
+it does not establish that a real sample contains mixed-direction molecules.
+
+The decision in `auto` is made for each record. Missing, empty, or non-`Z` gene
+tags retain alignment-direction separation. Every valid nonempty gene string is
+trusted, including the literal `NA`; IsoUMI does not reinterpret placeholder or
+multi-gene strings. Literal `NA` is escaped in grouping keys so it remains
+distinct from a missing gene tag. Gene-tagged and untagged records still have
+different gene keys and do not join merely because their other fields match.
+
+This policy applies to exact and compatible structure grouping and to
+`--no-structure`, with both ratio and directional UMI correction. Ignoring
+direction allows otherwise matching reads in both directions to support one
+molecule. Cell, gene, source/input scope, contig, selected structural context,
+and UMI correction rules still define the group. It does not infer transcript
+strand or reverse-complement UMI strings. Input sequence and the alignment
+orientation flag are preserved; normal duplicate marking still applies.
+
+**Migration:** `auto` is a default behavior change in the unreleased source.
+Published IsoUMI 0.1.1 always separates alignment directions. To reproduce that
+grouping on current source, add `--strand-mode alignment` and keep the other
+analysis settings unchanged. Gene-tagged reads now use different grouping keys
+and molecule IDs under `auto`, even when all reads align in one direction and
+the molecule count is unchanged. With `--end-bin`, ignored direction also uses
+genomic `EL`/`ER` terms instead of the legacy `E5`/`E3` terms.
+
+`auto` relies on upstream annotations to distinguish genes and antisense
+features that should remain separate. It cannot distinguish same-gene antisense
+molecules assigned the same gene string; shared UMIs can still collide.
+`ignore` broadens grouping without requiring gene annotations, so choose it
+only when that interpretation fits the input. This policy does not establish
+biological molecule identity by itself.
+
 ### `--structure-mode <exact|compatible>` default `exact`
 
 `exact` uses the existing SJ grid and locus-bin keys. `compatible` is an
 experimental alternative for variable alignment coordinates and truncated
-junction chains. It retains cell, gene, source, input, contig and strand
-boundaries. Within each boundary it uses equal-length raw UMI Hamming
-neighborhoods to limit the search, compares structures using the original
-coordinates, then reruns the selected UMI correction method using counts in
-the final structure groups. A candidate neighborhood is not itself a molecule.
+junction chains. It retains cell, gene, source, input, contig and the direction
+boundaries selected by `--strand-mode`. Within each boundary it uses
+equal-length raw UMI Hamming neighborhoods to limit the search, compares
+structures using the original coordinates, then reruns the selected UMI
+correction method using counts in the final structure groups. A candidate
+neighborhood is not itself a molecule.
 
 Observations are ordered by junction count, reference span and coordinates,
 with deterministic ties. Partial reads can attach to compatible longer
@@ -241,10 +294,12 @@ identity; it applies only to compatible mode.
 ### `--no-gene`
 
 Ignore the gene tag during grouping. The grouping key uses `GX=NA` for all
-reads.
+reads. With the default `--strand-mode auto`, this retains alignment-direction
+separation. Add `--strand-mode ignore` to omit that boundary as well.
 
 Use this only when gene tags are absent, unreliable, or intentionally excluded
-from an analysis. It makes groups broader and can increase UMI comparisons.
+from an analysis. Removing the gene boundary can increase UMI comparisons;
+under `auto`, it also restores the alignment-direction boundary.
 
 ### `--no-structure`
 
@@ -254,7 +309,7 @@ locus, and transcript-end structure in the grouping key.
 With this option, grouping still uses:
 
 ```text
-cell barcode + gene/NA + optional source/input scope + reference target + strand
+cell barcode + gene/NA + optional source/input scope + reference target + strand-mode policy
 ```
 
 This mode is intentionally less isoform-aware and is useful for showing how much
@@ -318,23 +373,36 @@ Typical choices:
 
 ### `--end-bin <INT>`
 
-Adds strand-aware transcript 5' and 3' end bins to the grouping key.
+Adds alignment-end bins to the grouping key in exact structure mode. The end
+labels follow the direction policy chosen by `--strand-mode`.
 
-For positive-strand reads:
+When alignment direction is ignored (`STR=.`), the bins use genomic left and
+right coordinates, independently of `FLAG 0x10`:
+
+```text
+EL = read_start
+ER = read_end
+```
+
+When alignment direction is retained, forward-aligned reads use:
 
 ```text
 E5 = read_start
 E3 = read_end
 ```
 
-For negative-strand reads:
+Reverse-aligned reads use:
 
 ```text
 E5 = read_end
 E3 = read_start
 ```
 
-Both ends are binned with `floor(position / end_bin) * end_bin`.
+Both ends are binned with `floor(position / end_bin) * end_bin`; `read_end` is
+exclusive. The `E5`/`E3` labels follow BAM alignment direction and do not infer
+RNA transcription strand. `--strand-mode alignment` preserves the legacy end
+keys. The genomic `EL`/`ER` keys prevent opposite alignment directions from
+splitting an otherwise matching group when direction is ignored.
 
 Use this when transcript-end differences are biologically important. Smaller
 values are more isoform-specific but more sensitive to truncation, soft
@@ -367,8 +435,9 @@ seed_count >= 2 * raw_count - 1
 Each unassigned UMI is visited in descending count and lexicographic order and
 becomes the root of all nodes reachable through outgoing edges. This permits
 transitive corrections through decreasing-count chains. The grouping context is
-still IsoUMI's cell/gene/strand/splice-junction or locus context, so results are
-not identical to a standalone UMI-tools run configured with different grouping.
+still IsoUMI's cell, gene, direction policy, and splice-junction or locus
+context, so results are not identical to a standalone UMI-tools run configured
+with different grouping.
 
 ### `--ham <INT>` default `1`
 
@@ -572,7 +641,7 @@ src/isoumi \
   --emit-explain
 ```
 
-### Transcript-end-aware grouping
+### Alignment-end-aware grouping
 
 ```bash
 src/isoumi \

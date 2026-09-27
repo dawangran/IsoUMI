@@ -14,10 +14,11 @@ make test
 sh examples/run_minimal.sh
 ```
 
-`make test` runs seven regression scripts covering UMI correction, synthetic
-truth, BAM tags, header merging, non-primary alignments, and input/output
-integrity, followed by release metadata checks. Tests that inspect BAM records
-require samtools; a skipped test is not a complete validation run. GitHub CI
+`make test` runs regression scripts covering UMI correction, synthetic
+truth, alignment-direction grouping, BAM tags, header merging, non-primary
+alignments, and input/output integrity, followed by release metadata checks.
+Tests that inspect BAM records require samtools; a skipped test is not a
+complete validation run. GitHub CI
 installs all test dependencies and runs the full suite on Ubuntu.
 
 ## Changes and tests
