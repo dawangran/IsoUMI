@@ -7,6 +7,7 @@
 #include "sj.h"
 #include "umi.h"
 #include "key_build.h"
+#include "structure.h"
 #include "key.h"
 #include "vector.h"
 #include <fcntl.h>
@@ -1509,66 +1510,34 @@ static int emit_correction_row(FILE* fp, const char* key, const map_item_t* item
   return 0;
 }
 
-static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam,
-                                FILE* explain_fp, int bucket_id,
-                                key_map_t** out_maps, int* out_nm,
-                                aggregate_t** out_aggregates, size_t* out_n_aggregates,
-                                strvec_t* non_primary_keys){
-  io_ctx_t io = {0};
-  bam1_t* b = NULL;
-  aggregate_table_t table = {0};
-  aggregate_t* arr = NULL;
-  key_map_t* km = NULL;
-  int km_n = 0, km_cap = 64;
-  int use_qual = want_umi_quality(o);
-  int read_rc = 0;
-  long ordinal = 0;
-  unsigned long long primary_reads = 0;
-  size_t n = 0;
-  kstring_t read_identity = {0, 0, NULL};
-
-  string_set_t non_primary_set = {0};
-  if (io_open(bucket_bam, NULL, &io) != 0) return -1;
-  b = bam_init1();
-  if (!b) goto fail;
-  while ((read_rc = sam_read1(io.in, io.hdr, b)) >= 0){
-    long current_ordinal = ordinal++;
-    const char* umi;
-    const char* cb;
-    const char* umi_qual = NULL;
-    char* key;
-    if (is_unmapped(b)) continue;
-    if (is_non_primary(b)){
-      if (build_read_identity_buf(o, b, &read_identity) != 0 ||
-          string_set_add(&non_primary_set, read_identity.s) != 0) goto fail;
-      continue;
+static int candidate_root(int* parent, int i){
+  while (parent[i] != i){ parent[i] = parent[parent[i]]; i = parent[i]; }
+  return i;
+}
+static int build_candidate_neighborhoods(const cli_opts_t* o, const umi_stat_t* stats,
+                                         int n, umi_assignment_t** out){
+  int* parent=malloc((size_t)n*sizeof(int));
+  umi_assignment_t* a=calloc((size_t)n,sizeof(*a));
+  if (!parent || !a){ free(parent); free(a); return -1; }
+  for (int i=0; i<n; ++i) parent[i]=i;
+  for (int i=0; i<n; ++i) for (int j=i+1; j<n; ++j){
+    if (hamming_leq(stats[i].umi,stats[j].umi,o->ham)){
+      int x=candidate_root(parent,i), y=candidate_root(parent,j);
+      if (x < y) parent[y]=x; else parent[x]=y;
     }
-    umi = get_tag_Z(b, o->umi_tag);
-    cb = get_tag_Z(b, o->cell_tag);
-    if (!umi || !cb) continue;
-    key = build_group_key(b, o->cell_tag, o->gene_tag,
-                          o->source_tag, active_input_scope_tag(o),
-                          o->no_gene, o->no_structure,
-                          o->locus_bin, o->sj_jitter, o->end_bin);
-    if (!key) goto fail;
-    if (use_qual) umi_qual = get_tag_Z(b, o->umi_qual_tag);
-    if (aggregate_table_add(&table, key, umi, umi_qual, b, current_ordinal) != 0){
-      goto fail;
-    }
-    primary_reads++;
   }
-  if (read_rc < -1) goto fail;
-  bam_destroy1(b);
-  b = NULL;
-  io_close(&io);
-  n = table.n;
-  arr = aggregate_table_take_sorted(&table);
-  if (n > 0 && !arr) goto fail;
-  if (primary_reads > 0){
-    LOG_BUCKET(bucket_id, "aggregated %llu primary records into %zu unique group/UMI entries",
-               primary_reads, n);
+  for (int i=0; i<n; ++i){
+    a[i].rep_idx=a[i].parent_idx=candidate_root(parent,i);
+    a[i].confidence=1.0;
   }
+  free(parent); *out=a; return 0;
+}
 
+static int build_maps_from_aggregates(const cli_opts_t* o, aggregate_t* arr, size_t n,
+                                      FILE* explain_fp, int bucket_id, int neighborhoods,
+                                      key_map_t** out_maps, int* out_nm){
+  key_map_t* km=NULL;
+  int km_n=0, km_cap=64;
   km = (key_map_t*)malloc(sizeof(*km) * (size_t)km_cap);
   if (!km) goto fail;
   for (size_t i=0; i<n; ){
@@ -1595,7 +1564,8 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam,
       finalize_umi_quality(&uc[idx]);
     }
     qsort(uc, (size_t)uc_n, sizeof(*uc), cmp_umi_stat_desc);
-    if (build_umi_assignments(o, uc, uc_n, &assignments) != 0){
+    if ((neighborhoods ? build_candidate_neighborhoods(o, uc, uc_n, &assignments)
+                       : build_umi_assignments(o, uc, uc_n, &assignments)) != 0){
       free_umi_stats(uc, uc_n);
       goto fail;
     }
@@ -1676,6 +1646,74 @@ static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam,
     i=j;
   }
   qsort(km, (size_t)km_n, sizeof(*km), cmp_key_map);
+  *out_maps=km; *out_nm=km_n; return 0;
+fail:
+  free_key_maps(km,km_n); return -1;
+}
+
+static int build_bucket_mapping(const cli_opts_t* o, const char* bucket_bam,
+                                FILE* explain_fp, int bucket_id,
+                                key_map_t** out_maps, int* out_nm,
+                                aggregate_t** out_aggregates, size_t* out_n_aggregates,
+                                strvec_t* non_primary_keys){
+  io_ctx_t io = {0};
+  bam1_t* b = NULL;
+  aggregate_table_t table = {0};
+  aggregate_t* arr = NULL;
+  key_map_t* km = NULL;
+  int km_n = 0;
+  int use_qual = want_umi_quality(o);
+  int read_rc = 0;
+  long ordinal = 0;
+  unsigned long long primary_reads = 0;
+  size_t n = 0;
+  kstring_t read_identity = {0, 0, NULL};
+
+  string_set_t non_primary_set = {0};
+  if (io_open(bucket_bam, NULL, &io) != 0) return -1;
+  b = bam_init1();
+  if (!b) goto fail;
+  while ((read_rc = sam_read1(io.in, io.hdr, b)) >= 0){
+    long current_ordinal = ordinal++;
+    const char* umi;
+    const char* cb;
+    const char* umi_qual = NULL;
+    char* key;
+    if (is_unmapped(b)) continue;
+    if (is_non_primary(b)){
+      if (build_read_identity_buf(o, b, &read_identity) != 0 ||
+          string_set_add(&non_primary_set, read_identity.s) != 0) goto fail;
+      continue;
+    }
+    umi = get_tag_Z(b, o->umi_tag);
+    cb = get_tag_Z(b, o->cell_tag);
+    if (!umi || !cb) continue;
+    key = build_group_key(b, o->cell_tag, o->gene_tag,
+                          o->source_tag, active_input_scope_tag(o),
+                          o->no_gene, o->no_structure || o->structure_mode == STRUCTURE_COMPATIBLE,
+                          o->locus_bin, o->sj_jitter, o->end_bin);
+    if (!key) goto fail;
+    if (use_qual) umi_qual = get_tag_Z(b, o->umi_qual_tag);
+    if (aggregate_table_add(&table, key, umi, umi_qual, b, current_ordinal) != 0){
+      goto fail;
+    }
+    primary_reads++;
+  }
+  if (read_rc < -1) goto fail;
+  bam_destroy1(b);
+  b = NULL;
+  io_close(&io);
+  n = table.n;
+  arr = aggregate_table_take_sorted(&table);
+  if (n > 0 && !arr) goto fail;
+  if (primary_reads > 0){
+    LOG_BUCKET(bucket_id, "aggregated %llu primary records into %zu unique group/UMI entries",
+               primary_reads, n);
+  }
+
+  if (build_maps_from_aggregates(o,arr,n,
+       o->structure_mode == STRUCTURE_COMPATIBLE ? NULL : explain_fp,
+       bucket_id,o->structure_mode == STRUCTURE_COMPATIBLE,&km,&km_n)!=0) goto fail;
   if (string_set_export(&non_primary_set, non_primary_keys) != 0) goto fail;
   string_set_destroy(&non_primary_set);
   *out_maps = km;
@@ -1705,6 +1743,78 @@ static const map_item_t* find_in_key_map(const key_map_t* km, int km_n, const ch
       return NULL; }
     if (c<0) lo=mid+1; else hi=mid-1; }
   return NULL;
+}
+
+static int build_compatible_mapping(const cli_opts_t* o, const char* path,
+                                    FILE* explain_fp, int bucket_id,
+                                    key_map_t** maps, int* nm,
+                                    aggregate_t** aggregates, size_t* n_aggregates,
+                                    structure_map_t* structures){
+  io_ctx_t io={0};
+  bam1_t* b=NULL;
+  aggregate_table_t table={0};
+  aggregate_t* arr=NULL;
+  key_map_t* local_maps=NULL;
+  int local_nm=0, rc=0;
+  long ordinal=0;
+  size_t n=0;
+  if (io_open(path,NULL,&io)!=0) goto fail;
+  b=bam_init1();
+  if (!b) goto fail;
+  while ((rc=sam_read1(io.in,io.hdr,b))>=0){
+    long current=ordinal++;
+    const char* raw=get_tag_Z(b,o->umi_tag);
+    const char* cb=get_tag_Z(b,o->cell_tag);
+    char* key;
+    const map_item_t* item;
+    if (is_unmapped(b) || is_non_primary(b) || !raw || !cb) continue;
+    key=build_group_key(b,o->cell_tag,o->gene_tag,o->source_tag,active_input_scope_tag(o),
+                        o->no_gene,1,o->locus_bin,o->sj_jitter,0);
+    if (!key) goto fail;
+    item=find_in_key_map(*maps,*nm,key,raw);
+    if (!item){ free(key); goto fail; }
+    if (structure_map_add(structures,key,item->corr_umi,item->raw_umi,b,current)!=0) goto fail;
+  }
+  if (rc < -1) goto fail;
+  bam_destroy1(b); b=NULL; io_close(&io);
+  if (structure_map_finish(structures,o->sj_tolerance,o->min_structure_support)!=0) goto fail;
+  /* Revisit primary records to retain raw counts, qualities and representative
+     ordinals. The final correction graph is rebuilt within each structure. */
+  if (io_open(path,NULL,&io)!=0) goto fail;
+  b=bam_init1(); if (!b) goto fail;
+  ordinal=0;
+  while ((rc=sam_read1(io.in,io.hdr,b))>=0){
+    long current=ordinal++;
+    const char* raw=get_tag_Z(b,o->umi_tag);
+    const char* cb=get_tag_Z(b,o->cell_tag);
+    const char* key;
+    if (is_unmapped(b) || is_non_primary(b) || !raw || !cb) continue;
+    key=structure_map_key(structures,current);
+    if (!key || aggregate_table_add(&table,sdup(key),raw,
+         want_umi_quality(o) ? get_tag_Z(b,o->umi_qual_tag) : NULL,b,current)!=0) goto fail;
+  }
+  if (rc < -1) goto fail;
+  bam_destroy1(b); b=NULL; io_close(&io);
+  n=table.n; arr=aggregate_table_take_sorted(&table);
+  if (n && !arr) goto fail;
+  if (build_maps_from_aggregates(o,arr,n,explain_fp,bucket_id,0,&local_maps,&local_nm)!=0) goto fail;
+  free_key_maps(*maps,*nm); free_aggregates(*aggregates,*n_aggregates);
+  *maps=local_maps; *nm=local_nm; *aggregates=arr; *n_aggregates=n;
+  return 0;
+fail:
+  bam_destroy1(b); io_close(&io); aggregate_table_destroy(&table);
+  free_aggregates(arr,n); free_key_maps(local_maps,local_nm);
+  return -1;
+}
+
+static char* read_group_key(const cli_opts_t* o, bam1_t* b, long ordinal,
+                            const structure_map_t* structures){
+  if (o->structure_mode == STRUCTURE_COMPATIBLE){
+    const char* key=structure_map_key(structures,ordinal);
+    return key ? sdup(key) : NULL;
+  }
+  return build_group_key(b,o->cell_tag,o->gene_tag,o->source_tag,active_input_scope_tag(o),
+                          o->no_gene,o->no_structure,o->locus_bin,o->sj_jitter,o->end_bin);
 }
 
 typedef struct {
@@ -1991,6 +2101,7 @@ static int build_primary_read_statuses(const cli_opts_t* o, const char* bucket_b
                                        const key_map_t* km, int km_n,
                                        molecule_t* mols, int mol_n, int bucket_id,
                                        const strvec_t* non_primary_keys,
+                                       const structure_map_t* structures,
                                        read_status_t** out_statuses, int* out_n){
   io_ctx_t io = {0};
   bam1_t* b = NULL;
@@ -2019,10 +2130,7 @@ static int build_primary_read_statuses(const cli_opts_t* o, const char* bucket_b
       if (!sorted_strvec_contains(non_primary_keys, read_identity.s)) continue;
       read_key = sdup(read_identity.s);
       if (!read_key) goto fail;
-      char* key = build_group_key(b, o->cell_tag, o->gene_tag,
-                                  o->source_tag, active_input_scope_tag(o),
-                                  o->no_gene, o->no_structure,
-                                  o->locus_bin, o->sj_jitter, o->end_bin);
+      char* key = read_group_key(o,b,current_ordinal,structures);
       const map_item_t* item;
       const char* corr;
       int molecule_idx;
@@ -2138,6 +2246,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
     key_map_t* km=NULL; int km_n=0;
     molecule_t* mols=NULL; int mol_n=0;
     aggregate_t* aggregates=NULL; size_t n_aggregates=0;
+    structure_map_t structures={0};
     read_status_t* read_statuses=NULL; int read_status_n=0;
     strvec_t non_primary_keys;
     int bucket_failed = 0;
@@ -2155,9 +2264,15 @@ static int phase_bucket_dedup(const cli_opts_t* o){
     }
     if (build_bucket_mapping(o, ib, f_corr, i, &km, &km_n,
                              &aggregates, &n_aggregates,
-                             &non_primary_keys)!=0){
+                             &non_primary_keys)!=0 ||
+        (o->structure_mode == STRUCTURE_COMPATIBLE &&
+         build_compatible_mapping(o,ib,f_corr,i,&km,&km_n,&aggregates,
+                                  &n_aggregates,&structures)!=0)){
       if (f_corr){ fclose(f_corr); remove(corrf); }
       strvec_free(&non_primary_keys);
+      free_aggregates(aggregates,n_aggregates);
+      structure_map_destroy(&structures);
+      free_key_maps(km,km_n);
       LOG_BUCKET(i, "mapping failed");
       status |= 1;
       continue;
@@ -2171,6 +2286,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         remove(corrf);
         free_aggregates(aggregates, n_aggregates);
         strvec_free(&non_primary_keys);
+        structure_map_destroy(&structures);
         free_key_maps(km, km_n);
         status |= 1;
         continue;
@@ -2184,6 +2300,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
       if (o->emit_explain){ remove(corrf); }
       free_aggregates(aggregates, n_aggregates);
       strvec_free(&non_primary_keys);
+      structure_map_destroy(&structures);
       free_key_maps(km, km_n);
       status |= 1;
       continue;
@@ -2194,12 +2311,13 @@ static int phase_bucket_dedup(const cli_opts_t* o){
 
     sort_unique_strvec(&non_primary_keys);
     if (build_primary_read_statuses(o, ib, km, km_n, mols, mol_n, i,
-                                    &non_primary_keys,
+                                    &non_primary_keys,&structures,
                                     &read_statuses, &read_status_n) != 0){
       LOG_BUCKET(i, "primary-read status construction failed");
       if (o->emit_explain){ remove(corrf); }
       strvec_free(&non_primary_keys);
       free_molecules(mols, mol_n);
+      structure_map_destroy(&structures);
       free_key_maps(km, km_n);
       status |= 1;
       continue;
@@ -2212,6 +2330,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
       if (o->emit_explain){ remove(corrf); }
       free_read_statuses(read_statuses, read_status_n);
       free_molecules(mols, mol_n);
+      structure_map_destroy(&structures);
       free_key_maps(km, km_n);
       status |= 1;
       continue;
@@ -2226,7 +2345,8 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         bucket_failed = 1;
       } else {
         if (fprintf(f_mol,"key\tumi_corr\tcount\tbucket\n") < 0 ||
-            fprintf(f_asn,"qname\tmolecule_id\tdup\tbucket\n") < 0){
+            fprintf(f_asn,"qname\tmolecule_id\tdup\tbucket%s\n",
+                    o->structure_mode == STRUCTURE_COMPATIBLE ? "\tstructure_status" : "") < 0){
           LOG_BUCKET(i, "failed to write TSV headers");
           bucket_failed = 1;
         }
@@ -2241,6 +2361,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
       io_close(&io);
       free_read_statuses(read_statuses, read_status_n);
       free_molecules(mols, mol_n);
+      structure_map_destroy(&structures);
       free_key_maps(km, km_n);
       status |= 1;
       LOG_BUCKET(i, "out of memory allocating BAM record");
@@ -2325,10 +2446,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
         cb_copy = sdup(cb);
         if (!cb_copy){ LOG_BUCKET(i, "failed to copy cell barcode"); bucket_failed = 1; break; }
       }
-      char* key = build_group_key(b, o->cell_tag, o->gene_tag,
-                                  o->source_tag, active_input_scope_tag(o),
-                                  o->no_gene, o->no_structure,
-                                  o->locus_bin, o->sj_jitter, o->end_bin);
+      char* key = read_group_key(o,b,current_ordinal,&structures);
       if (!key){ LOG_BUCKET(i, "key build failed"); free(cb_copy); bucket_failed = 1; break; }
 
       item = find_in_key_map(km, km_n, key, raw);
@@ -2375,7 +2493,9 @@ static int phase_bucket_dedup(const cli_opts_t* o){
           bucket_failed = 1;
           break;
         }
-        if (fprintf(f_asn, "%s\t%s\t%d\t%d\n", qn?qn:"*", mi2, is_dup ? 1 : 0, i) < 0){
+        if (fprintf(f_asn, "%s\t%s\t%d\t%d%s%s\n", qn?qn:"*", mi2, is_dup ? 1 : 0, i,
+                    o->structure_mode == STRUCTURE_COMPATIBLE ? "\t" : "",
+                    o->structure_mode == STRUCTURE_COMPATIBLE ? structure_map_status(&structures,current_ordinal) : "") < 0){
           free(mi2);
           free(cb_copy);
           free(key);
@@ -2417,6 +2537,7 @@ static int phase_bucket_dedup(const cli_opts_t* o){
       bucket_failed = 1;
     }
 
+    structure_map_destroy(&structures);
     free_key_maps(km, km_n);
     free_molecules(mols, mol_n);
     free_read_statuses(read_statuses, read_status_n);

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Adds experimental `--structure-mode compatible` with direct splice-coordinate
+  tolerance and truncation-aware structural assignment. Raw UMI Hamming
+  neighborhoods limit the search; UMI correction is recomputed within final
+  structure groups. Exact grid grouping remains the default.
+- Retains conflicting low-support structures and reports ambiguous structural
+  assignments instead of allowing partial reads to join incompatible anchors.
+
 - Adds `--strip-pg` to consistently omit header `@PG` records, record-level
   `PG` tags, and IsoUMI's own program record from temporary and final BAMs.
 - Stream-aggregates repeated grouping-key/UMI observations, avoiding per-read

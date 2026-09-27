@@ -9,6 +9,8 @@ typedef enum {
   CORRECTION_DIRECTIONAL = 1
 } correction_method_t;
 
+typedef enum { STRUCTURE_EXACT = 0, STRUCTURE_COMPATIBLE = 1 } structure_mode_t;
+
 typedef struct {
   strvec_t bam_list;
   char *out_prefix, *command_line;
@@ -19,6 +21,8 @@ typedef struct {
   int  no_gene, no_structure, ham, locus_bin, sj_jitter, end_bin, emit_tsv, emit_explain, quality_aware;
   int  keep_tmp, isolate_inputs, set_bam_dup_flag, strip_pg;
   correction_method_t correction_method;
+  structure_mode_t structure_mode;
+  int sj_tolerance, min_structure_support;
   double ratio, min_merge_confidence;
 } cli_opts_t;
 

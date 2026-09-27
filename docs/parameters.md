@@ -190,6 +190,54 @@ keys.
 Grouping parameters decide which reads are allowed to compare UMIs. They do not
 directly change UMI distance calculations.
 
+### `--structure-mode <exact|compatible>` default `exact`
+
+`exact` uses the existing SJ grid and locus-bin keys. `compatible` is an
+experimental alternative for variable alignment coordinates and truncated
+junction chains. It retains cell, gene, source, input, contig and strand
+boundaries. Within each boundary it uses equal-length raw UMI Hamming
+neighborhoods to limit the search, compares structures using the original
+coordinates, then reruns the selected UMI correction method using counts in
+the final structure groups. A candidate neighborhood is not itself a molecule.
+
+Observations are ordered by junction count, reference span and coordinates,
+with deterministic ties. Partial reads can attach to compatible longer
+structures. Fixed structural witnesses and checks against assigned members
+prevent explicit splice/retained-intron conflicts from joining the same group;
+lack of overlap between two partial reads is not itself a conflict. An anchor
+still requires positive overlap with a candidate read. Structural compatibility
+does not connect conflicting anchors transitively.
+
+Anchor support is frozen before ambiguous observations are assigned. If all
+otherwise compatible anchors conflict with already assigned members, the
+observation remains in a separate unresolved group. Low support does not justify
+forcing a conflicting observation into a dominant group. Fixed witnesses make
+this a conservative heuristic and can retain extra groups. The assignment
+report exposes ambiguities; it does not establish a uniquely identified source
+molecule.
+
+This mode cannot be combined with `--no-structure` or `--end-bin`.
+`--sj-jitter` and `--locus-bin` apply only to exact mode.
+
+### `--sj-tolerance <INT>` default `10`
+
+Maximum absolute difference in base pairs when matching each boundary of an
+observed junction to a compatible-mode anchor junction. Zero requires exact
+boundary coordinates. This is a direct coordinate tolerance, distinct from
+`--sj-jitter` grid rounding. Increasing the tolerance can accommodate alignment
+variation but also removes the ability to distinguish genuine nearby splice
+sites. Truncation compatibility must still satisfy the junction-chain and
+exonic-coverage checks.
+
+### `--min-structure-support <INT>` default `3`
+
+Primary-read support threshold used to prefer anchors when a read is compatible
+with more than one structure. Among equally preferred anchors, raw-UMI support
+and then total anchor support determine the choice. A uniquely compatible read
+can join an anchor below this threshold. Conflicting low-support structures
+remain separate. This heuristic is not a confidence level or proof of molecular
+identity; it applies only to compatible mode.
+
 ### `--no-gene`
 
 Ignore the gene tag during grouping. The grouping key uses `GX=NA` for all
@@ -457,6 +505,17 @@ Write molecule and assignment reports:
 
 Use this for benchmarking, molecule count comparisons, and debugging duplicate
 labels.
+
+Compatible mode adds a `structure_status` column to the assignment report:
+
+| Value | Meaning |
+| --- | --- |
+| `compatible` | A unique compatible anchor whose unambiguous support reaches `--min-structure-support` |
+| `unsupported` | An anchor below the support threshold, or a separate unresolved group created after conflict checks; the observation is retained |
+| `ambiguous` | More than one compatible anchor; assignment uses frozen support and deterministic tie breaking |
+
+These labels describe structural assignment, not calibrated probabilities.
+Molecule counts and duplicate flags still come from local UMI correction.
 
 ### `--emit-explain`
 
