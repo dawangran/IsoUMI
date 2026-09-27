@@ -1,663 +1,305 @@
-# IsoUMI
+<p align="center"><img src="docs/assets/isoumi-icon.png" width="112" alt="IsoUMI icon" /></p>
+<h1 align="center">IsoUMI</h1>
+<p align="center">Alignment-context-aware UMI correction for long-read single-cell sequencing</p>
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT" /></a>
+  <a href="src/Makefile"><img src="https://img.shields.io/badge/language-C11-555555" alt="Language: C11" /></a>
+  <a href="VERSION"><img src="https://img.shields.io/badge/version-0.1.1-168C8C" alt="Source version: 0.1.1" /></a>
+  <a href="https://github.com/dawangran/IsoUMI/actions/workflows/ci.yml"><img src="https://github.com/dawangran/IsoUMI/actions/workflows/ci.yml/badge.svg" alt="Build and tests" /></a>
+</p>
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="docs/parameters.md">Parameter guide</a> ·
+  <a href="wdl/README.md">WDL workflow</a> ·
+  <a href="https://github.com/dawangran/IsoUMI/issues">Issues</a>
+</p>
 
-IsoUMI is a command-line tool for UMI correction and molecule-level deduplication on long-read single-cell BAM files.
+IsoUMI corrects unique molecular identifiers (UMIs) and marks duplicate reads in
+long-read single-cell BAM files. It restricts UMI comparisons by cell barcode,
+gene, strand, and alignment context: splice-junction chains for spliced reads,
+or genomic start/end bins for non-spliced reads. Optional transcript-end bins
+and sample boundaries provide additional control over grouping.
 
-It is designed for workflows where each read may carry:
+The tool writes corrected UMI tags, duplicate labels, and optional audit tables.
+It operates on existing alignments and annotations; it does not align reads,
+assign genes, or reconstruct transcript isoforms.
 
-- a cell barcode tag such as `CB`
-- a raw UMI tag such as `UR`
-- an optional UMI quality tag such as `UY`
-- an optional gene tag such as `GX`
+## Installation
 
-IsoUMI groups reads by cell and transcript context, corrects low-support UMIs toward higher-support UMIs, marks duplicates, and writes a corrected BAM plus optional TSV reports.
+The current source version is **0.1.1**. Build from source on Linux or macOS, or
+use the [Docker image](#docker-and-jupyterlab).
 
-## What It Does
+### Build from source
 
-Given one or more BAM files, IsoUMI:
+Requirements: a C11 compiler, GNU Make, HTSlib and its compression/network
+libraries. `pkg-config` is recommended for locating HTSlib. Install Python 3
+and samtools for the full test suite; samtools also provides BAM filtering and
+indexing.
 
-1. Splits reads into cell-barcode buckets for parallel processing.
-2. Builds a molecule grouping key from:
-   - cell barcode
-   - gene tag, unless `--no-gene` is used
-   - optional source tag or input scope
-   - strand
-   - splice-junction or locus structure, unless `--no-structure` is used
-   - optional transcript-end bins via `--end-bin`
-3. Counts UMIs from primary alignments inside each group.
-4. Corrects low-support UMIs with either direct count-ratio assignment or UMI-tools-style directional networks.
-5. Optionally incorporates UMI quality information when ranking ratio-mode merges and computing diagnostic confidence.
-6. Writes corrected UMI tags back to BAM and optionally emits molecule, assignment, and correction-explanation tables.
-
-## Key Features
-
-- Long-read-aware grouping using splice-junction structure or genomic locus bins
-- Multi-BAM input support
-- Cell-bucket sharding for scalable parallel processing
-- Quality-aware UMI scoring using `--umi-qual-tag`
-- Optional merge-confidence filtering with `--min-merge-confidence`
-- Optional directional UMI networks using the UMI-tools `2n-1` count rule
-- Optional explainability output with `--emit-explain`
-- Optional transcript-end-aware grouping with `--end-bin`
-- Baseline no-structure grouping for application-note comparisons via `--no-structure`
-- Optional source-aware grouping via `--source-tag` or `--isolate-inputs`
-- Standard SAM duplicate flag support, with custom duplicate tag retained
-- Header merging for multi-input BAMs
-- Unmapped reads are passed through without participating in molecule collapse
-- Secondary and supplementary alignments do not inflate UMI counts and inherit
-  corrected-UMI and duplicate status from their primary read when a matching
-  primary record is available
-
-## Availability And Citation
-
-IsoUMI is released under the MIT license. The current maintenance release is
-version `0.1.1`; the original publication release is version `0.1.0`.
-
-- Source code: https://github.com/dawangran/IsoUMI
-- Archive DOI: add the Zenodo or institutional archive DOI after tagging the release.
-- Citation metadata: see [`CITATION.cff`](./CITATION.cff).
-- Application note draft: see [`docs/application_note.md`](./docs/application_note.md).
-- Manuscript and figure plan: see [`docs/application_note_manuscript_plan.md`](./docs/application_note_manuscript_plan.md) and [`docs/figure_design.md`](./docs/figure_design.md).
-
-## Build
-
-The source code lives in [`src/`](./src). The binary is built there as `isoumi`.
-
-### Standard build
+On Ubuntu/Debian, install build and test dependencies:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libhts-dev samtools python3 \
+  libcurl4-openssl-dev zlib1g-dev libbz2-dev liblzma-dev
+```
+
+Then build and check the executable:
+
+```bash
+git clone https://github.com/dawangran/IsoUMI.git
+cd IsoUMI
 make
+src/isoumi --version
+make test
 ```
 
-The default build avoids CPU-specific `-march=native` flags so release builds
-remain portable across machines. For a local performance build on the same CPU
-family, use:
+The executable is `src/isoumi`. The default build avoids CPU-specific
+instructions; `make NATIVE=1` enables optimization for the build machine.
 
-```bash
-make NATIVE=1
-```
-
-### Dependencies
-
-IsoUMI depends on:
-
-- `htslib`
-- zlib / bzip2 / lzma / curl / OpenSSL libraries needed by your local `htslib`
-
-The `Makefile` supports a few common setups:
-
-- `pkg-config`-based `htslib`
-- manual `HTSLIB_INC` and `HTSLIB_LIB`
-- a fallback path for `Rhtslib` on macOS
-
-On macOS, OpenMP is not enabled by default because the system compiler commonly lacks it. In that case `--threads` is accepted but bucket processing runs serially and IsoUMI prints a runtime notice. Build with appropriate `OPENMP_CFLAGS` and `OPENMP_LDFLAGS` if you install an OpenMP-capable toolchain.
-
-Examples:
+For an HTSlib installation outside standard paths:
 
 ```bash
 make -C src HTSLIB_INC=/path/to/htslib/include HTSLIB_LIB=/path/to/htslib/lib
 ```
 
-If your `htslib` build needs OpenSSL symbols, pass them explicitly through `CRYPTO_LIBS`, for example:
+Additional linking requirements can be supplied through `HTS_EXTRA_LIBS` or
+`CRYPTO_LIBS`, for example `make CRYPTO_LIBS="-lcrypto"`.
 
-```bash
-make CRYPTO_LIBS="-lcrypto"
-```
+**Threading:** Linux builds enable OpenMP by default. On macOS, OpenMP is off by
+default; `--threads` still controls HTSlib input decoding and final BAM
+compression, but bucket processing is serial and prints a runtime notice.
+Configure `OPENMP_CFLAGS` and `OPENMP_LDFLAGS` for an OpenMP-capable toolchain to
+enable parallel bucket processing on macOS.
 
-Run the smoke test after building:
+## Quick start
 
-```bash
-make test
-```
-
-Continuous integration is configured in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) for Ubuntu builds with `libhts-dev`.
-
-## Docker and JupyterLab
-
-The published image contains IsoUMI `0.1.1`, samtools, Python, and JupyterLab:
-
-```bash
-docker pull dawang02/isoumi:0.1.1
-```
-
-Run IsoUMI directly by replacing the image's default Jupyter command:
-
-```bash
-docker run --rm \
-  -v "$PWD:/data" \
-  dawang02/isoumi:0.1.1 \
-  isoumi --bam /data/input.bam --out /data/sample --threads 8
-```
-
-Start JupyterLab and persist notebooks and outputs in the current directory:
-
-```bash
-docker run --rm -p 8888:8888 \
-  -e JUPYTER_TOKEN='replace-with-a-private-token' \
-  -v "$PWD:/workspace" \
-  dawang02/isoumi:0.1.1
-```
-
-Open `http://localhost:8888` and use the configured token. If `JUPYTER_TOKEN`
-is omitted, Jupyter generates a temporary token and prints its URL in the
-container logs. A bundled quick-start notebook is available at
-[`notebooks/IsoUMI_quickstart.ipynb`](./notebooks/IsoUMI_quickstart.ipynb).
-
-The WDL workflow and example inputs are under [`wdl/`](./wdl). The workflow
-returns IsoUMI's duplicate-marked BAM and can additionally create a sorted,
-indexed BAM containing representative reads only.
-
-## Quick Start
-
-### Single BAM
-
-```bash
-src/isoumi --bam input.bam --out sample
-```
-
-This writes:
-
-- `sample.dedup.bam`
-
-### Multiple BAMs
-
-```bash
-src/isoumi \
-  --bam sample1.bam \
-  --bam sample2.bam \
-  --out merged_run
-```
-
-### BAM list file
-
-```bash
-src/isoumi --bam-list bam_files.txt --out run1
-```
-
-Where `bam_files.txt` contains one BAM path per line. Blank lines and `#` comments are allowed.
-
-### Compact BAM without program provenance
-
-```bash
-src/isoumi \
-  --bam sample1.bam \
-  --bam sample2.bam \
-  --out merged_run \
-  --strip-pg
-```
-
-This removes both header `@PG` lines and record-level `PG` tags from temporary
-and final BAMs. IsoUMI does not add its own program record in this mode.
-
-### Minimal Reproducible Example
-
-A tiny SAM fixture is provided under [`examples/`](./examples) for checking command-line behavior:
-
-```bash
-make
-sh examples/run_minimal.sh
-```
-
-The example writes outputs under `examples/output/` and should show raw UMI `AAAT` collapsing to `AAAA` in `minimal.corrections.tsv`.
-
-## Recommended Example
+Run on a BAM containing `CB` cell barcodes and `UR` raw UMIs:
 
 ```bash
 src/isoumi \
   --bam input.bam \
   --out sample \
-  --threads 8 \
-  --buckets 128 \
-  --emit-tsv \
-  --emit-explain \
-  --end-bin 50 \
-  --min-merge-confidence 0.45
-```
-
-This writes:
-
-- `sample.dedup.bam`
-- `sample.molecules.tsv`
-- `sample.assignments.tsv`
-- `sample.corrections.tsv`
-
-## Core Algorithm
-
-IsoUMI defines a candidate molecule using a grouping key of the form:
-
-- `CB`
-- `GX` or `GX=NA`
-- optional `SRC` from `--source-tag`
-- optional `IN` from `--isolate-inputs`
-- reference target ID
-- strand
-- splice-junction hash or locus hash
-- optional 5'/3' end bins when `--end-bin` is enabled
-
-When `--no-structure` is used, the key intentionally omits splice-junction, locus, and transcript-end terms. This mode is intended as an internal baseline for evaluating the value of isoform-aware grouping.
-
-Dynamic tag values in keys and molecule IDs percent-escape `%`, `|`, and `=`.
-The literal tag value `NA` is escaped as well so it remains distinct from a
-missing tag. This makes the serialized key unambiguous without changing common
-barcode and gene values.
-
-Inside each group, unique UMIs are counted and corrected using the method selected
-by `--correction-method`.
-
-With the default `ratio` method:
-
-1. Candidate seed UMIs are processed from strongest to weakest.
-2. A lower-count raw UMI merges only when the raw-to-seed pair directly satisfies
-   `--ham`, `smaller / larger <= --ratio`, and the optional confidence floor.
-3. Seed priority is count, optional mean UMI quality, then lexicographic order.
-4. Chain-based corrections that exceed the direct raw-to-seed Hamming threshold
-   are not allowed.
-
-With the `directional` method:
-
-1. A directed edge `A -> B` is added when the UMIs are within `--ham` and
-   `count(A) >= 2 * count(B) - 1`.
-2. Seeds are visited by descending count and then lexicographic UMI order.
-3. All UMIs reachable through outgoing edges are assigned to the same seed, so
-   a final raw-to-seed distance may exceed `--ham` through a valid chain.
-4. UMI quality, `--ratio`, and merge confidence do not change graph membership.
-
-This reproduces the UMI-tools directional count/network rule inside IsoUMI's
-isoform-aware grouping keys; it is not identical to running standalone UMI-tools
-because the upstream grouping context differs.
-
-## Input Expectations
-
-IsoUMI expects:
-
-- BAM inputs with compatible reference dictionaries
-- UMI values stored as 2-character SAM tags
-- cell barcode values stored in `--cell-tag`
-- optional UMI-quality values stored as a string tag of the same length as the UMI
-
-For multiple BAM inputs:
-
-- `@SQ` dictionaries must match by target name, order, and length; conflicting
-  `M5` or `AS` values are rejected across all inputs, while a value first seen
-  in a later input is preserved in the merged output header
-- metadata such as `@RG`, `@PG`, and `@CO` are merged when possible
-- conflicting `@RG` lines with the same `ID` are treated as an error
-- every `@PG PP` parent must resolve within the same input header
-- every `@PG` chain from later inputs is placed in a deterministic per-input
-  namespace; `ID`, `PP`, and record-level `PG:Z:` references are rewritten
-  together so no program definition or provenance link is discarded
-- the output header receives its own unique `@PG` entry containing the IsoUMI
-  version and command line
-- use `--strip-pg` to remove all input `@PG` lines and record-level `PG:Z:`
-  tags and to suppress IsoUMI's own `@PG`; header and record provenance are
-  removed together so the output cannot contain dangling `PG` references
-- inputs are deduplicated together by default; use `--isolate-inputs` for independent samples or `--source-tag RG` when read-group tags define the desired source/library boundary
-
-## Important Output Semantics
-
-### Corrected BAM
-
-IsoUMI writes a corrected UMI tag to `--umi-out` (default `UB`).
-
-It also writes a duplicate flag tag to `--dup-flag` (default `DA`) with the following semantics:
-
-- `DA=0`: best representative read for that corrected molecule, or a passthrough read that was not deduplicated
-- `DA=1`: duplicate read within the same corrected molecule
-
-By default, IsoUMI also sets the standard SAM duplicate bit (`0x400`) consistently with `DA`. Use `--no-bam-dup-flag` if you want to leave the standard BAM flag untouched and rely only on the custom tag.
-
-For deduplicated molecules, the representative read is chosen by higher mapping quality, then longer aligned reference span, then longer query length, then earlier input order as a stable tie-breaker.
-
-Unmapped reads:
-
-- do not participate in molecule correction
-- are passed through
-- keep `UB=UR` if a raw UMI exists
-- are written with `DA=0`
-
-Mapped reads without a cell barcode:
-
-- do not participate in molecule correction
-- are passed through
-- keep `UB=UR` if a raw UMI exists
-- are written with `DA=0`
-- are omitted from molecule, assignment, and correction reports
-
-Reads without a raw UMI do not participate in deduplication. Any pre-existing
-value in the configured corrected-UMI or molecule-ID output tag is removed, and
-the record is emitted with duplicate status `0`.
-
-Secondary and supplementary alignments:
-
-- do not contribute to UMI abundance, correction networks, molecule counts, or
-  assignment reports
-- inherit `UB`, `DA`, the standard duplicate bit, and optional molecule ID from
-  the matching primary record with the same QNAME, input scope, and read-end flag
-- pass through with `UB=UR` and `DA=0` if no matching eligible primary record is
-  available in the same cell bucket
-
-Mapped secondary and supplementary records must carry the same cell-barcode tag
-as their primary record. A mapped non-primary record without that tag is rejected
-because it cannot be routed to the primary record's bucket reliably.
-
-Primary QNAMEs must be unambiguous within an input scope. If multiple primary
-records with the same QNAME/read-end identity imply different molecule
-assignments, IsoUMI fails rather than propagating an arbitrary result. Use
-`--isolate-inputs` when independent inputs may reuse QNAMEs.
-
-### Sort Order
-
-Because reads are bucketed and concatenated, output BAM order should be treated as:
-
-- `SO:unknown`
-
-Do not assume coordinate-sorted or queryname-sorted output unless you sort it afterward.
-
-## Main Parameters
-
-This section is a quick reference. For detailed parameter logic, tuning
-recommendations, and interactions, see [`docs/parameters.md`](./docs/parameters.md).
-
-### Inputs and outputs
-
-- `--bam <FILE>`: input BAM, repeatable
-- `--bam-list <FILE>`: file containing BAM paths
-- `--out <PREFIX>`: output prefix
-- `--strip-pg`: remove all header `@PG` lines and record-level `PG` tags
-
-### Tags
-
-- `--cell-tag <TAG>`: cell barcode tag, default `CB`
-- `--umi-tag <TAG>`: raw UMI tag, default `UR`
-- `--umi-qual-tag <TAG>`: UMI quality tag, default `UY`
-- `--gene-tag <TAG>`: gene tag, default `GX`
-- `--source-tag <TAG>`: existing source/library tag to include in grouping, for example `RG`
-- `--umi-out <TAG>`: corrected UMI tag to write, default `UB`
-- `--dup-flag <TAG>`: duplicate flag tag, default `DA`
-- `--mol-tag <TAG>`: optional molecule ID tag
-- `--input-scope-tag <TAG>`: temporary internal tag used by `--isolate-inputs`, default `zi`
-
-### UMI correction
-
-- `--correction-method <ratio|directional>`: correction algorithm, default `ratio`
-- `--ham <INT>`: maximum Hamming distance, default `1`
-- `--ratio <FLOAT>`: ratio-mode requirement `smaller / larger <= ratio`, range `0..1`, default `0.10`; ignored by directional mode
-- `--min-merge-confidence <FLOAT>`: optional ratio-mode confidence floor, default `0.00`; positive values are incompatible with directional mode
-- `--no-quality-aware`: disable quality-aware ranking and quality contribution to confidence
-
-### Grouping
-
-- `--no-gene`: ignore gene tag during grouping
-- `--no-structure`: ignore splice-junction, locus, and transcript-end structure during grouping; useful as a baseline comparison mode
-- `--isolate-inputs`: treat each `--bam` or `--bam-list` entry as a separate grouping source
-- `--locus-bin <INT>`: bin size for non-spliced reads, default `1000`
-- `--sj-jitter <INT>`: splice-boundary rounding to the nearest jitter multiple before hashing, default `10`
-- `--end-bin <INT>`: add strand-aware transcript-end bins to the grouping key
-
-### Performance
-
-- `--threads <INT>`: bucket workers plus parallel BAM input decoding/final-output compression, default `4`
-- `--buckets <INT>`: number of cell buckets, default `64`
-- `--tmp-dir <DIR>`: bucket directory, default `<out>.isoumi.tmp.<pid>`. The directory must not already exist.
-- `--keep-tmp`: keep temporary bucket files
-
-Bucket statistics are aggregated while records are streamed, so memory scales
-with unique grouping-key/UMI combinations plus unique mapped non-primary read
-identities in active buckets rather than with the total number of records.
-Repeated secondary/supplementary identities are hash-deduplicated while reading.
-Intermediate BAMs use fast level-1 compression. Unless `--keep-tmp` is set,
-each source bucket is removed after its deduplicated bucket closes successfully;
-deduplicated buckets and report fragments are reclaimed as their contents are
-copied into same-directory staging outputs. Final BAM and report paths are
-replaced only after their staging file closes successfully, and they may not
-alias an input file. This keeps scratch usage close to one intermediate
-generation plus the growing staged final output. For very large inputs, place
-`--tmp-dir` and the output prefix on local SSD/NVMe storage and increase
-`--buckets` if a small number of high-depth cells still dominate peak memory.
-
-### Reports
-
-- `--emit-tsv`: write molecule and assignment TSVs
-- `--emit-explain`: write correction explanation TSV
-- `--no-bam-dup-flag`: do not update the standard SAM duplicate bit
-
-## Report Files
-
-### `*.molecules.tsv`
-
-Columns:
-
-- `key`
-- `umi_corr`
-- `count`
-- `bucket`
-
-This is a molecule-level summary after correction.
-
-### `*.assignments.tsv`
-
-Columns:
-
-- `qname`
-- `molecule_id`
-- `dup`
-- `bucket`
-
-This maps each read name to a corrected molecule assignment.
-
-### `*.corrections.tsv`
-
-Columns:
-
-- `key`
-- `raw_umi`
-- `corr_umi`
-- `raw_count`
-- `seed_count`
-- `hamming`
-- `raw_avgq`
-- `seed_avgq`
-- `confidence`
-- `reason`
-- `bucket`
-- `method`
-- `parent_umi`
-- `parent_count`
-- `edge_hamming`
-- `path_length`
-
-`reason` is currently one of:
-
-- `self`: no correction was needed
-- `count+distance`: correction supported by count and sequence distance
-- `count+quality`: correction additionally supported by quality information
-- `directional`: correction through a directional graph edge or path
-
-`corr_umi`, `seed_count`, and `seed_avgq` describe the final component root before
-lower-support UMIs are merged into it. `parent_umi`, `parent_count`, and
-`edge_hamming` describe the immediate graph edge used to reach a directional
-assignment. `path_length` is zero for a root, one for a direct correction, and
-greater than one for a transitive directional correction. Consequently,
-`hamming` (raw UMI to final root) can exceed `--ham` in directional mode. The
-final corrected molecule read count is reported in `*.molecules.tsv`.
-
-For `self` rows, `confidence` is reported as `1.0`. For actual UMI corrections,
-`confidence` is a heuristic edge score derived from count ratio, Hamming distance,
-and optional UMI quality; it is not a posterior probability. Directional mode
-reports this value for auditing but never uses it to accept or reject an edge.
-
-## Practical Tips
-
-- Start with defaults if your BAM already carries `CB`, `UR`, `UY`, and `GX`.
-- For separate samples or libraries that may reuse cell barcodes, use `--isolate-inputs` or include an existing source tag with `--source-tag`.
-- Use `--no-gene` only if gene tags are absent or unreliable.
-- Use `--end-bin` when you want molecule grouping to better respect transcript ends.
-- Use `--emit-explain` when benchmarking or tuning parameters.
-- Use `--correction-method directional` to evaluate UMI-tools-style correction within IsoUMI transcript contexts, especially for sparse UMI counts.
-- Put `--tmp-dir` on local SSD/NVMe storage for large BAMs; temporary bucket I/O
-  is normally the largest storage workload. Without `--keep-tmp`, completed
-  bucket generations and report fragments are deleted incrementally. Keep free
-  space for the growing atomically staged final BAM as well.
-- Use `--keep-tmp` only when you need to inspect intermediates; it retains both
-  source and deduplicated bucket BAMs and therefore needs substantially more space.
-- Raise `--buckets` for larger datasets to spread unique grouping-key/UMI
-  entries across smaller working sets.
-- Tighten `--min-merge-confidence` if you want more conservative UMI correction.
-
-## Synthetic Truth Data And Tests
-
-IsoUMI includes a deterministic synthetic truth generator for application-note
-benchmarks and regression tests:
-
-```bash
-python3 scripts/generate_synthetic_truth.py --out-dir benchmarks/output/synthetic_truth
-```
-
-This writes:
-
-- `synthetic_truth.sam`
-- `synthetic_truth.truth.tsv`
-
-The fixture covers UMI error correction within one junction context, same-UMI
-different-junction separation, different-cell and different-chromosome
-separation, non-spliced locus-bin correction, and missing-cell passthrough.
-
-Run IsoUMI on the generated data:
-
-```bash
-src/isoumi \
-  --bam benchmarks/output/synthetic_truth/synthetic_truth.sam \
-  --out benchmarks/output/synthetic_truth/isoumi \
-  --threads 1 \
-  --buckets 8 \
-  --ham 1 \
-  --ratio 0.60 \
   --emit-tsv \
   --emit-explain
 ```
 
-The full test suite now exercises both the hand-written smoke fixtures and the
-synthetic truth generator:
+This uses **ratio correction** with Hamming distance `1` and a maximum
+low-count/high-count ratio of `0.10`. It produces:
+
+| File | Contents |
+| --- | --- |
+| `sample.dedup.bam` | All input records with corrected UMI and duplicate annotations |
+| `sample.molecules.tsv` | Corrected UMI groups and their primary-read support |
+| `sample.assignments.tsv` | Eligible primary-read assignments and duplicate labels |
+| `sample.corrections.tsv` | Raw-to-corrected UMI mappings and correction diagnostics |
+
+Despite its `.dedup.bam` suffix, the BAM **retains duplicate records**. To remove
+records marked as duplicates, then coordinate-sort and index the result:
 
 ```bash
-make test
+samtools view -b -F 1024 sample.dedup.bam \
+  | samtools sort -o sample.filtered.sorted.bam
+samtools index sample.filtered.sorted.bam
 ```
 
-## Example Workflows
+This filter only removes records carrying the SAM duplicate bit. Unmapped,
+secondary, supplementary, and other passthrough records can remain; it is not a
+strict one-record-per-molecule filter. IsoUMI's BAM output itself is unsorted
+(`SO:unknown`).
 
-### Conservative correction
-
-```bash
-src/isoumi \
-  --bam input.bam \
-  --out conservative \
-  --ham 1 \
-  --ratio 0.05 \
-  --min-merge-confidence 0.60 \
-  --emit-explain
-```
-
-### Isoform-aware grouping
+For a small, self-contained example:
 
 ```bash
-src/isoumi \
-  --bam input.bam \
-  --out isoform_run \
-  --end-bin 25 \
-  --emit-tsv \
-  --emit-explain
-```
-
-### Directional UMI correction
-
-```bash
-src/isoumi \
-  --bam input.bam \
-  --out directional \
-  --correction-method directional \
-  --ham 1 \
-  --emit-tsv \
-  --emit-explain
-```
-
-### Tag remapping
-
-```bash
-src/isoumi \
-  --bam input.bam \
-  --out custom_tags \
-  --cell-tag XC \
-  --umi-tag XM \
-  --umi-qual-tag XQ \
-  --gene-tag GN \
-  --umi-out UB \
-  --dup-flag DA
-```
-
-## Current Limitations
-
-- UMI distance is still sequence-based and currently uses Hamming distance only.
-- UMI quality is used for seed ranking and confidence scoring, not a full probabilistic error model.
-- Directional graph construction compares UMI pairs within each grouping key and can be expensive for groups with very many unique UMIs.
-- Final BAM linking depends on your local `htslib` setup; some static `htslib` builds may require extra libraries through `HTS_EXTRA_LIBS` or `CRYPTO_LIBS`.
-- Output BAM is not coordinate-sorted by construction.
-
-## Release Checks
-
-Before tagging a publication release:
-
-```bash
-make clean
-make
-make test
-make check-release
 sh examples/run_minimal.sh
 ```
 
-`make check-release` requires final publication metadata, including the public
-repository URL and archive DOI, and intentionally fails while placeholders
-remain.
+The [example](examples/README.md) writes to `examples/output/` and demonstrates
+correction of `AAAT` to `AAAA` in one UMI group.
 
-The release checklist is maintained in [`docs/release_checklist.md`](./docs/release_checklist.md).
+## Input requirements
 
-## Benchmark Scaffold
+IsoUMI accepts one or more SAM/BAM files without requiring pre-sorting or an
+index. Preprocessing must supply the cell and UMI tags used by your analysis;
+tag names are configurable.
 
-For publication benchmarks, use [`scripts/benchmark_isoumi.sh`](./scripts/benchmark_isoumi.sh) as the command template and document datasets under [`benchmarks/`](./benchmarks). The scaffold records dataset labels, input size and counts where available, exact commands, elapsed time, peak RSS, exit status, and parameters for default, transcript-end-aware, conservative correction, baseline, and optional sensitivity settings. Use [`scripts/summarize_benchmark_reports.py`](./scripts/summarize_benchmark_reports.py) to generate a manuscript-ready `summary.tsv`.
+| Tag | Default | Role |
+| --- | --- | --- |
+| Cell barcode | `CB` | Required for a mapped primary read to participate in correction |
+| Raw UMI | `UR` | Required for UMI correction and duplicate grouping |
+| Gene assignment | `GX` | Included in grouping by default; missing values form an `NA` group |
+| UMI quality | `UY` | Optional Phred+33 string, with the same length as the UMI |
 
-## Repository Layout
+Use `--no-gene` to omit gene annotations, or remap tags such as
+`--cell-tag XC --umi-tag XM --gene-tag GN`. Tag names must be valid, distinct
+SAM tags; `PG` is reserved for program provenance. UMI comparison uses Hamming
+distance and therefore compares equal-length strings.
 
-```text
-.
-├── CITATION.cff
-├── CHANGELOG.md
-├── CONTRIBUTING.md
-├── LICENSE
-├── Makefile
-├── README.md
-├── VERSION
-├── benchmarks/
-│   └── README.md
-├── docs/
-│   ├── application_note.md
-│   └── release_checklist.md
-├── examples/
-│   ├── README.md
-│   ├── minimal.sam
-│   └── run_minimal.sh
-├── tests/
-│   └── smoke.sh
-└── src/
-    ├── Makefile
-    ├── main.c
-    ├── cli.c
-    ├── pipeline.c
-    ├── key_build.c
-    ├── sj.c
-    ├── umi.c
-    └── ...
+### Multiple inputs
+
+Technical splits from the same barcode namespace can be processed together:
+
+```bash
+src/isoumi --bam lane1.bam --bam lane2.bam --out combined --emit-tsv
 ```
 
-## Version
+Alternatively, use `--bam-list bam_files.txt`, with one path per line. Blank
+lines and lines beginning with `#` are ignored. Inputs are deduplicated together
+by default. Use `--isolate-inputs` for independent samples that may reuse cell
+barcodes, or `--source-tag RG` when read-group tags define the library boundary.
 
-Current version string in the source:
+Reference dictionaries must agree in target name, order, and length.
+Conflicting reference metadata or read-group definitions are rejected. Program
+headers and record-level `PG` tags are merged consistently, and IsoUMI records
+its version and command line in a new `@PG` entry. See the
+[parameter guide](docs/parameters.md#inputs-and-outputs) for header validation
+and the optional `--strip-pg` behavior.
 
-- `IsoUMI 0.1.1`
+## Output semantics
+
+- **Corrected UMI:** written to `UB` by default; change it with `--umi-out`.
+- **Duplicate status:** `DA:i:1` marks a duplicate; `DA:i:0` marks a
+  representative or passthrough record. The SAM duplicate bit (`0x400`) is set
+  or cleared consistently unless `--no-bam-dup-flag` is used.
+- **Representative selection:** higher mapping quality, then longer aligned
+  reference span, then longer query length, then earlier input order.
+- **Molecule IDs:** `--mol-tag` writes the group and corrected UMI identifier to
+  a BAM tag. IDs also appear in the assignment report.
+
+Only eligible primary alignments contribute to UMI counts and molecule reports.
+Unmapped reads and mapped primary reads without a cell barcode or raw UMI pass
+through with duplicate status `0`. Their corrected UMI equals the raw UMI when
+available; if the raw UMI is absent, stale corrected-UMI and molecule-ID tags are
+removed.
+
+Secondary and supplementary alignments inherit corrected UMI and duplicate
+status from an unambiguous matching primary record. They do not inflate UMI
+counts or assignment reports. Mapped non-primary records must carry the same
+cell barcode as their primary; those without a cell tag are rejected. Records
+without a matching eligible primary pass through without correction. Ambiguous
+primary read identities are rejected; use `--isolate-inputs` when independent
+files may reuse read names.
+
+## Method
+
+IsoUMI partitions records into cell-barcode buckets, then corrects UMIs within
+keys containing cell, gene (unless disabled), optional source, reference,
+strand, and alignment context.
+
+| Read context | Default grouping |
+| --- | --- |
+| Spliced (`N` in CIGAR) | Junction chain with boundaries rounded to the nearest 10 bp |
+| Non-spliced | Pair of genomic start and exclusive end bins, each 1,000 bp wide |
+| Optional transcript ends | Strand-aware 5′ and 3′ bins set with `--end-bin` |
+
+`--sj-jitter` specifies rounding to a fixed grid, not a pairwise distance
+threshold. Reads on opposite sides of a rounding boundary can fall into
+different groups even when their coordinates differ by only one base.
+`--no-structure` omits junction, locus, and end terms while retaining cell,
+gene, source, reference, and strand.
+
+Two correction methods are available:
+
+- **`ratio` (default):** each raw UMI must satisfy the Hamming-distance,
+  count-ratio, and optional confidence thresholds directly against its final
+  seed. Seed priority is count, optional mean UMI quality, then lexicographic
+  order.
+- **`directional`:** an edge from UMI A to B requires
+  `count(A) >= 2 × count(B) − 1` and distance within `--ham`. Reachable UMIs are
+  assigned to a seed in descending count and lexicographic order. Transitive
+  paths can yield a final raw-to-seed distance greater than `--ham`.
+
+Directional mode uses the UMI-tools count/network rule within IsoUMI's grouping
+contexts. Different grouping definitions can produce different results from
+standalone UMI-tools. In directional mode, `--ratio` is ignored, quality does
+not determine network membership, and positive `--min-merge-confidence` values
+are rejected.
+
+**Interpretation:** alignment context can separate UMIs associated with
+different transcript structures, but alignment variation and incomplete reads
+can also split evidence from the same molecule. More reported groups do not,
+on their own, establish greater molecular accuracy. Reported merge confidence
+is a heuristic score, not a posterior probability. Directional pairwise
+comparison can be costly for groups with many distinct UMIs.
+
+## Common configurations
+
+These examples illustrate specific analysis choices; they are not universal
+parameter recommendations. See the [parameter guide](docs/parameters.md) for
+all options, defaults, and interactions.
+
+```bash
+# Directional correction within alignment-context groups
+src/isoumi --bam input.bam --out directional \
+  --correction-method directional --ham 1 --emit-tsv --emit-explain
+
+# Stricter direct ratio correction
+src/isoumi --bam input.bam --out conservative \
+  --ratio 0.05 --min-merge-confidence 0.60 --emit-explain
+
+# Add 50 bp transcript-end bins
+src/isoumi --bam input.bam --out end_aware --end-bin 50 --emit-tsv
+
+# Compare the same correction method without alignment structure
+src/isoumi --bam input.bam --out no_structure \
+  --correction-method directional --no-structure --emit-tsv --emit-explain
+
+# Keep independent inputs separate even when barcodes are reused
+src/isoumi --bam sample1.bam --bam sample2.bam --out separate \
+  --isolate-inputs --emit-tsv
+```
+
+For large inputs, `--threads`, `--buckets`, and `--tmp-dir` control parallelism
+and scratch storage. Use a new temporary directory on local SSD/NVMe storage
+and allow space for the growing final output. More buckets can reduce memory
+per bucket, although one high-complexity cell still occupies a single bucket.
+Temporary files are reclaimed incrementally unless `--keep-tmp` is set.
+
+## Docker and JupyterLab
+
+The container includes IsoUMI, samtools, Python, and JupyterLab:
+
+```bash
+docker pull dawang02/isoumi:0.1.1
+docker run --rm -v "$PWD:/data" dawang02/isoumi:0.1.1 \
+  isoumi --bam /data/input.bam --out /data/sample --threads 8
+```
+
+Start JupyterLab with a private token and persist work in the current directory:
+
+```bash
+docker run --rm -p 127.0.0.1:8888:8888 \
+  -e JUPYTER_TOKEN='replace-with-a-private-token' \
+  -v "$PWD:/workspace" dawang02/isoumi:0.1.1
+```
+
+Open `http://localhost:8888` with the configured token. If the token variable is
+omitted, Jupyter generates a token and prints the access URL in the container
+logs. The [quick-start notebook](notebooks/IsoUMI_quickstart.ipynb) provides an
+interactive example.
+
+The [WDL workflow](wdl/README.md) runs directional correction without gene
+grouping or quality-aware scoring and produces both the annotated BAM and a
+filtered, sorted, indexed BAM. Its analysis settings differ from CLI defaults;
+review them before running it with miniwdl or Cromwell.
+
+## Reproducibility and citation
+
+Run `make test` for regression checks and follow the
+[benchmark guide](benchmarks/README.md) for synthetic fixtures, benchmark
+commands, and report summaries. Small fixtures test defined behaviors; they do
+not establish performance across biological datasets.
+
+For reproducible analyses, record the source commit and version, container
+digest if applicable, exact command, input accession or checksum, reference
+and annotation versions, and baseline settings. Benchmark results apply to the
+revision and configuration tested; rerun them when either changes.
+
+Software citation metadata is available in [`CITATION.cff`](CITATION.cff).
+Cite the exact version or commit used. See the
+[release checklist](docs/release_checklist.md) for publication and archival
+requirements.
+
+IsoUMI is distributed under the [MIT license](LICENSE). For bug reports or
+feature requests, open a [GitHub issue](https://github.com/dawangran/IsoUMI/issues)
+with the version, command, error log, and a minimal example when possible.
